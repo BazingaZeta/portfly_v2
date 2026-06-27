@@ -485,3 +485,21 @@ export function getOpenIndexBuys(userId: number): IndexTrade[] {
 export function markIndexTradeClosed(id: number): void {
   db().prepare(`UPDATE index_trades SET status = 'closed' WHERE id = ?`).run(id);
 }
+
+// ---- Momentum RS Trader (isolated subset of index_trades with MOMENTUM_ prefix) ----
+
+export function getMomentumTrades(userId: number): IndexTrade[] {
+  const rows = db()
+    .prepare(`SELECT * FROM index_trades WHERE index_key LIKE 'MOMENTUM_%' AND user_id = ? ORDER BY executed_at DESC`)
+    .all(userId) as IndexTradeRow[];
+  return rows.map(rowToIndexTrade);
+}
+
+export function getOpenMomentumBuys(userId: number): IndexTrade[] {
+  const rows = db()
+    .prepare(
+      `SELECT * FROM index_trades WHERE action = 'BUY' AND status = 'open' AND index_key LIKE 'MOMENTUM_%' AND user_id = ? ORDER BY executed_at ASC`
+    )
+    .all(userId) as IndexTradeRow[];
+  return rows.map(rowToIndexTrade);
+}

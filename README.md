@@ -1,195 +1,226 @@
-# Finance Bot — Daily Signals
+# Finance Bot — Portfly
 
-Piattaforma locale che ogni giorno analizza **notizie + stato tecnico** dei titoli
-e suggerisce eventuali **BUY** su trend di breve, con tracking delle operazioni
-e P&L live. Nessun costo: usa dati gratuiti (Yahoo Finance non ufficiale + RSS).
+Piattaforma di analisi finanziaria per il mercato azionario USA. Combina segnali tecnici,
+forza relativa, notizie e bot automatico in un'unica interfaccia. Dati gratuiti via Yahoo Finance.
 
-> ⚠️ **Non è consulenza finanziaria.** I segnali sono generati da regole
-> deterministiche su indicatori tecnici e da un sentiment lessicale sulle notizie.
-> Le decisioni di investimento sono tue.
+> ⚠️ **Non è consulenza finanziaria.** I segnali sono generati da regole deterministiche su
+> indicatori tecnici e sentiment lessicale. Le decisioni di investimento sono sempre tue.
 
-## Avvio
+---
+
+## Avvio rapido
 
 ```bash
 npm install
 npm run dev
 ```
 
-Apri http://localhost:3000 e premi **▶ Scan giornaliera**.
+Apri [http://localhost:3000](http://localhost:3000) e accedi con le tue credenziali.
 
-## Come funziona
+---
 
-1. **Scan** (`lib/scanner.ts`): per ogni titolo dell'universo (`lib/universe.ts`)
-   scarica ~1 anno di candele giornaliere e calcola indicatori
-   (`lib/indicators.ts`): RSI 14, EMA 9/21, SMA 50, ROC 10, volume vs media, ATR.
-2. **Scoring**: ogni condizione che si attiva aggiunge/sottrae peso. Solo i titoli
-   sopra la SMA 50 e con score tecnico ≥ 45 passano allo step notizie.
-3. **Notizie** (`lib/news.ts`): per i finalisti scarica le headline da Yahoo Finance
-   RSS, calcola un sentiment lessicale e lo applica come bonus/penalità.
-4. **Output**: vengono salvati i segnali con score finale ≥ 64 (alta convinzione),
-   con entry, **target** (+2.5 ATR), **stop** (−1.5 ATR), R/R e razionale leggibile.
+## Sezioni
 
-### Tarare il comportamento
+### 📊 Segnali giornalieri (`/`)
 
-In `lib/scanner.ts`:
+La dashboard principale. Ogni giorno analizza l'intero universo di titoli USA e genera
+segnali **BUY** ad alta convinzione.
 
-| Costante      | Default | Effetto |
-|---------------|---------|---------|
-| `TECH_GATE`   | 45      | Soglia tecnica per considerare un titolo |
-| `FINAL_GATE`  | 64      | Soglia finale per emettere un segnale (alza = meno segnali, più convinti) |
-| `STOP_ATR`    | 1.5     | Distanza dello stop in ATR |
-| `TARGET_ATR`  | 2.5     | Distanza del target in ATR |
+**Come funziona:**
+1. Per ogni titolo scarica ~1 anno di candele giornaliere e calcola gli indicatori:
+   RSI 14, EMA 9/21, SMA 50, ROC 10, volume vs media, ATR 14.
+2. Ogni condizione tecnica attiva aggiunge/sottrae peso. Solo i titoli sopra SMA 50
+   con score ≥ 45 passano al filtro notizie.
+3. Scarica headline da Yahoo Finance RSS e applica un sentiment lessicale come bonus/penalità.
+4. Emette segnali con score finale ≥ 64, con **entry, target (+2.5 ATR), stop (−1.5 ATR)**,
+   R/R e razionale leggibile.
 
-L'universo dei titoli scansionati è in `lib/universe.ts` — aggiungi/togli ticker liberamente.
+**Funzionalità:**
+- Auto-scansione giornaliera all'apertura dell'app (nessun click manuale)
+- Ricerca per ticker o nome, filtro per settore, ordinamento per score/upside/sentiment
+- Sparkline degli ultimi 40 giorni con linee target/stop su ogni card
+- Badge earnings: segnalazione se la prossima data earnings è entro 7 giorni
+- Filtro regime di mercato: in mercato ribassista (SPY sotto SMA 50/200) i BUY vengono penalizzati
+- Position sizing suggerito: quante azioni comprare per rischiare la % impostata
 
-## Tracking
+---
 
-- **Segnali**: premi *Ho comprato* su una card per registrare l'acquisto (azioni + prezzo).
-- **Portafoglio**: posizioni aperte con P&L live (prezzo aggiornato da Yahoo), e
-  *Ho venduto* per chiudere una posizione e registrare il P&L realizzato.
-- **Notizie**: feed generale mercati/tech/mondo con sentiment per titolo.
+### 💼 Portafoglio (`/track`)
 
-I prezzi delle card (riga "Ora") e il P&L del portafoglio si **aggiornano da soli
-ogni 30 secondi** mentre la pagina è aperta (badge "aggiornato alle HH:MM"). Entry,
-target e stop dei segnali restano fissi: sono la foto scattata al momento dello scan.
+Tracking delle posizioni aperte con P&L live e storico delle operazioni.
 
-### Automazioni utili
+**Funzionalità:**
+- P&L non realizzato aggiornato ogni 30 secondi (prezzi live da Yahoo Finance)
+- Barra stop → target per ogni posizione
+- **Segnali di uscita intelligenti:** trailing stop dal massimo, RSI ipercomprato, EMA che gira,
+  notizie negative — con avvisi evidenziati e notifiche desktop opzionali
+- Rischio aperto totale (% del capitale allo stop) con colore di allerta
+- Chiusura posizione con registrazione del P&L realizzato
 
-- **Auto-scansione giornaliera**: aprendo l'app, se oggi non è ancora stata fatta
-  una scansione, parte automaticamente (banner in alto). Niente click manuale.
-- **Alert di uscita + notifiche desktop** (pagina Portafoglio): ogni posizione mostra
-  una barra **stop → target**; quando il prezzo tocca il target o lo stop compare un
-  banner "Vendi" e, se hai abilitato le notifiche, arriva un avviso desktop.
-- **Performance**: pagina con **P&L realizzato, win rate, rendimento medio** e storico
-  delle operazioni chiuse, per capire se i segnali funzionano.
+---
 
-### Index Trader (sezione isolata)
+### 🎯 Index Trader (`/index`)
 
-Pagina dedicata (`/index`), separata dal resto (API, tabella DB e logica proprie):
-1. Scegli un **indice** (S&P 500 / Nasdaq 100 / Dow 30).
-2. L'app calcola chi lo sta **spingendo di più** = peso (market cap) × movimento a
-   20 giorni, e ordina i titoli per contributo.
-3. Su quei leader applica **canali di regressione lineare** (40 giorni): se il canale è
-   **ascendente** (pendenza positiva, R² ≥ 0.5) genera un **COMPRA**, con
-   **entry/stop/target presi dal canale** (stop = banda inferiore, target = banda
-   superiore). Titoli senza trend pulito → AVOID.
-4. Tracking **isolato** (tabella `index_trades`) con P&L live e **stop-loss** evidenziato.
+Analisi dei titoli che guidano un indice borsistico tramite canali di regressione lineare.
+Sezione completamente isolata dal resto (API, tabella DB e logica separate).
 
-Il grafico mostra il prezzo dentro il canale di regressione (bande ±2σ).
+**Come funziona:**
+1. Scegli un indice: **S&P 500, Nasdaq 100 o Dow Jones 30**
+2. L'app identifica i titoli che contribuiscono di più all'indice:
+   peso (market cap) × rendimento a 20 giorni = "spinta"
+3. Applica **canali di regressione lineare** (40 barre) a ogni leader:
+   - Canale **ascendente** (pendenza > 0, R² ≥ 0.5) + forza relativa in salita → **COMPRA**
+   - Stop = banda inferiore del canale, target = banda superiore
+4. Filtra per forza relativa: il rapporto `prezzo_stock / ETF_indice` deve essere
+   anch'esso in canale ascendente (badge RS ↗)
 
-**Forza relativa (RS):** "quanto spinge il titolo l'indice" è misurato dal rapporto
-`prezzo_stock / prezzo_indice` (proxy ETF: SPY/QQQ/DIA). Se quel rapporto è in canale
-ascendente, il titolo sta **battendo** l'indice → lo guida davvero. Il BUY richiede sia
-canale prezzo ascendente **sia** RS in salita (badge "RS ↗").
+**Tracking:** posizioni isolate con P&L live, stop evidenziato a rosso se colpito.
 
-**Backtest + ottimizzatore** (`/api/index/backtest`, `/api/index/optimize`): sim realistica
-+ validazione out-of-sample. L'ottimizzatore prova **16 varianti** della strategia (zona
-d'ingresso, uscita canale/ATR/trailing, qualità del trend R², filtro RS, durata) e valida
-ognuna OOS.
+**Backtest:** simulazione realistica 2 anni con validazione out-of-sample, 16 varianti
+di strategia testate. Nota onesta: nessuna variante mostra un edge dimostrabile — utile
+come **screener dei leader**, non come sistema automatico cieco.
 
-> **Risultato onesto e definitivo:** nessuna delle 16 varianti ha un edge. **Tutte** perdono
-> sul periodo completo (−5% … −64%) e **tutte** perdono in-sample. Le poche positive
-> out-of-sample lo erano solo grazie al rimbalzo recente del mercato (negative in-sample =
-> rumore, non skill). Persino la migliore rende meno di un buy-and-hold dell'indice.
-> **Conclusione:** il timing a canali di regressione sui leader dell'indice **non ha un
-> vantaggio dimostrabile**. La sezione resta utile come **screener** (quali titoli guidano
-> l'indice + forza relativa), ma i segnali automatici NON vanno seguiti alla cieca — un
-> avviso in-app lo dichiara apertamente.
+---
 
-### Gestione del rischio (position sizing)
+### ⚡ Momentum RS (`/momentum`) ← **Nuova sezione**
 
-- Pannello **Risk management** (Segnali e Backtest): capitale + % di rischio per trade,
-  salvati in `localStorage`.
-- Ogni card mostra la **size suggerita**: quante azioni comprare per rischiare quella %
-  in base alla distanza dallo stop (`shares = capitale × rischio% / (entry − stop)`),
-  con costo e $ a rischio. La quantità pre-compila il form "Ho comprato".
-- Il **backtest** ora simula la size per rischio → equity curve in **$**, **CAGR**,
-  **max drawdown realistico** e capitale finale (non più "1 unità/trade").
-- Il **Portafoglio** mostra il **rischio aperto** totale (allo stop) come % del capitale,
-  con colore di allerta.
+Analisi della forza relativa basata sul **metatitolo** (approccio ispirato a portfly-python-refactor).
 
-> Nota: il backtest somma i trade in sequenza per data di uscita e **non limita il rischio
-> concorrente** (in live non puoi rischiare l'1% su 10 posizioni aperte insieme con un solo
-> conto). Il CAGR è quindi ottimistico; il "rischio aperto" del portafoglio serve proprio a
-> tenere sotto controllo questo limite nel mondo reale.
+**Concetto chiave — il Metatitolo:**
+Per ogni titolo, invece di analizzare il prezzo grezzo, calcolo il rapporto:
+```
+metatitolo[t] = prezzo_titolo[t] / prezzo_SPY[t]
+```
+Questo valore misura la performance del titolo **relativa al benchmark** giorno per giorno.
+Se il metatitolo è in trend ascendente, il titolo sta battendo l'indice — è un leader reale.
 
-### Autopilot (bot automatico su conto simulato)
+**Come funziona:**
+1. Scarica 2 anni di dati per SPY (benchmark) e ogni costituente dell'indice scelto
+2. Per ogni titolo costruisce la serie del metatitolo allineata per data
+3. Applica un **canale di regressione** (60 barre) sulla serie del metatitolo
+4. Calcola il **RS Score composito**: RS_30gg × 20% + RS_90gg × 50% + RS_180gg × 30%
+5. Ordina tutti i titoli per RS Score decrescente — i più alti sono i leader reali
 
-Sezione isolata `/autopilot`: un **motore autonomo** che gira una strategia **rinomata e
-testata** — **dual momentum + filtro di trend** (Faber GTAA / Antonacci) su un paniere di
-ETF (SPY, QQQ, IWM, EFA, EEM, VNQ, GLD, TLT, LQD, DBC). Tiene i 3 asset più forti che sono
-anche sopra la SMA200; altrimenti va in **cash** (modalità difensiva). Ribilancio mensile +
-uscita anticipata se un asset rompe il trend.
+**Segnali (dal canale del metatitolo):**
+| Condizione | Segnale |
+|------------|---------|
+| Canale ascendente + prezzo nella zona bassa/media (z ≤ 0.5) | **COMPRA** |
+| Canale ascendente + prezzo sovraesteso (z > 0.5) | **ATTENDI** |
+| Canale piatto o discendente | **EVITA** |
 
-- **Pilota automatico**: uno scheduler lato server (`instrumentation.ts`) esegue un ciclo
-  **ogni 10 minuti finché il server è aperto** — il bot opera da solo, senza click. Si ferma
-  alla chiusura del server e riparte da solo alla riaccensione (lo stato è su DB). Reset = stop.
-- **Conto SIMULATO (paper)**: analizza, compra e vende **da solo** su un portafoglio virtuale.
-  Nessun ordine reale, nessuna credenziale — per scelta e per sicurezza. Repliché tu gli
-  ordini sul broker se vuoi.
-- **Flow dati & decisioni** trasparente (log: dati scaricati → momentum → filtro trend →
-  selezione → ordini), **P&L live**, posizioni con peso, equity curve.
-- **Backtest 5 anni vs S&P 500** integrato. Risultato onesto: CAGR ~15% e **drawdown ~13%**
-  contro SPY ~19.5% / drawdown ~19%. In un mercato fortemente rialzista rende *meno* del
-  buy-and-hold, ma con **drawdown più bassi** (protegge nei ribassi andando in cash). È una
-  strategia di **gestione del rischio**, non una macchina da soldi.
+**Stop e Target:** derivati dal canale di regressione sul prezzo grezzo (40 barre).
 
-### Validazione & qualità dei segnali
+**Tracking:** posizioni isolate (tabella `index_trades` con prefisso `MOMENTUM_`), P&L live,
+performance summary con win rate e P&L realizzato totale.
 
-- **Backtest** (pagina dedicata): testa le regole tecniche + le uscite ATR sullo
-  storico (1–4 anni) e mostra **win rate, profit factor, expectancy, max drawdown**
-  ed equity curve. Solo tecnico (il sentiment notizie non è replicabile storicamente).
-  Parametri regolabili: soglia score, hold massimo, lookback, filtro regime on/off.
-  Serve a sapere se la strategia ha davvero un edge **prima** di rischiare capitale.
-- **Filtro di regime di mercato**: ogni scan classifica SPY (rialzista/neutro/ribassista
-  su SMA 50/200). In mercato ribassista i BUY vengono penalizzati; un banner mostra il
-  contesto. "Non combattere il trend di fondo."
-- **Filtro earnings**: per i finalisti viene recuperata la prossima data earnings; se è
-  entro 7 giorni il segnale è penalizzato e segnalato con un badge (evento binario, non
-  un trend pulito).
-- **Uscite intelligenti** (Portafoglio): oltre a target/stop statici, le posizioni
-  vengono ri-valutate (trailing stop dal massimo, RSI ipercomprato, EMA che gira,
-  notizie negative) con avvisi e notifiche desktop.
+**Differenze vs Index Trader:**
+- Index Trader usa il canale sul **prezzo grezzo** + RS come filtro secondario
+- Momentum RS usa il canale sul **metatitolo** come segnale primario + RS come ranking
+- Il ranking è per **forza relativa multi-periodo**, non per contributo di mercato cap
 
-Il backtest è **realistico**: simula un singolo conto con **max posizioni concorrenti**,
-vincolo di cassa, **gap che bucano lo stop**, **slippage** e commissioni. Mostra quante
-operazioni sono state davvero eseguite vs quante segnalate (il resto saltato per limiti di
-conto), equity in $, CAGR e drawdown veri.
+---
 
-Include la **validazione out-of-sample**: taratura su un periodo, test su un periodo mai
-usato, con verdetto automatico (regge / si indebolisce / crolla). Serve a smascherare
-l'overfitting. *Risultato onesto al momento: con le soglie attuali l'edge **non regge
-fuori campione** — va trattato come non dimostrato.*
+### 🤖 Autopilot (`/autopilot`)
 
-### Esplorazione dei segnali
+Bot autonomo su **conto simulato** (paper trading). Gira una strategia rinomata e testata:
+**dual momentum + filtro di trend** (ispirata a Faber GTAA / Antonacci) su ETF diversificati.
 
-Sulla pagina Segnali: **logo aziendale** su ogni card (con fallback a monogramma se il
-logo non carica), **ricerca testuale** (ticker o nome), **filtro per categoria/settore**
-(Tech, Finanza, Salute, Consumi, …) e **ordinamento** (score, potenziale al target,
-sentiment, variazione live, ticker). I loghi arrivano da CDN pubbliche keyed per ticker.
+**Paniere ETF:** SPY, QQQ, IWM, EFA, EEM, VNQ, GLD, TLT, LQD, DBC
 
-Ogni card mostra una **sparkline** degli ultimi 40 giorni con le linee tratteggiate di
-target (verde) e stop (rosso), e il prezzo live come ultimo punto. Le righe del
-Portafoglio hanno una sparkline con la linea del costo medio.
+**Logica:** mantiene i 3 asset con momentum più alto che siano sopra la SMA 200; se nessun
+asset soddisfa il criterio, va tutto in **cash** (modalità difensiva).
 
-## Dati
+**Funzionamento:**
+- Ribilancio **mensile automatico** + uscita anticipata se un asset rompe il trend
+- Scheduler lato server (`instrumentation.ts`): ciclo ogni ~10 minuti mentre il server è attivo
+- Nessun ordine reale, nessuna credenziale broker — simula e tu replichi sul tuo broker se vuoi
+- Log trasparente di ogni decisione: dati → momentum → filtro trend → selezione → ordini
 
-I dati (raccomandazioni + operazioni) sono salvati in SQLite locale: `data/finance-bot.db`
-(escluso da git). Cancellalo per ripartire da zero.
+**Risultato onesto (backtest 5 anni):** CAGR ~15%, max drawdown ~13% vs SPY ~19.5% / drawdown ~19%.
+In mercati fortemente rialzisti rende *meno* del buy-and-hold, ma con **drawdown minori** nei ribassi.
+È una strategia di gestione del rischio, non una macchina da soldi.
 
-## Lingua (i18n)
+---
 
-L'interfaccia è disponibile in **italiano e inglese**, selezionabili dal **dropdown
-lingua** nel menu (in basso nella sidebar). La scelta è salvata in `localStorage`.
-Tradotta tutta la UI statica (menu, titoli, pulsanti, controlli, tabelle, banner, modali).
+### 📈 Performance (`/performance`)
 
-Restano in italiano i testi **generati dal backend** (il razionale "Perché?" dei segnali,
-i messaggi degli alert/uscite, i messaggi di avanzamento dello scan); i titoli delle
-notizie sono in inglese perché arrivano così dalle fonti. Tradurre anche quelli richiede
-un refactor che faccia emettere al backend dei codici invece del testo.
+Statistiche sulle operazioni chiuse registrate manualmente nel Portafoglio:
+P&L realizzato totale, win rate, rendimento medio, miglior/peggior trade, storico completo.
 
-## Note
+---
 
-Yahoo Finance è una fonte non ufficiale e può cambiare/rate-limitare. Se uno scan
-restituisse pochi dati, riprova. Per dati affidabili in futuro si possono collegare
-provider con API key (Polygon, Finnhub, ecc.) sostituendo `lib/marketData.ts`.
+### 🧪 Backtest (`/backtest`)
+
+Testa la strategia dei Segnali giornalieri sullo storico (1–4 anni).
+
+**Parametri regolabili:** soglia score, durata massima di hold, anni di storico, filtro regime.
+
+**Output:** win rate, profit factor, expectancy, max drawdown, equity curve in $, CAGR,
+capitale finale, slippage simulato, max posizioni concorrenti.
+
+**Validazione out-of-sample:** taratura su un periodo, test su un periodo mai visto →
+verdetto automatico (edge regge / si indebolisce / crolla). Serve a smascherare l'overfitting.
+
+---
+
+### 📰 Notizie (`/news`)
+
+Feed notizie mercati, tecnologia e finanza con sentiment per titolo. Utile per contesto
+qualitativo a supporto dei segnali tecnici.
+
+---
+
+## Gestione del rischio (position sizing)
+
+Il pannello **Risk management** (in basso nella sidebar) salva capitale e % di rischio per trade in `localStorage`.
+
+Ogni segnale mostra la **size suggerita**:
+```
+azioni = (capitale × rischio%) / (entry − stop)
+```
+Con costo totale e dollari a rischio per trade. Il backtest simula questa logica per equity
+curve realistiche in $.
+
+---
+
+## Dati & persistenza
+
+- Tutti i dati di mercato arrivano da **Yahoo Finance** (gratuito, non ufficiale)
+- Le operazioni, segnali e stato del bot sono salvati in **SQLite**: `data/finance-bot.db`
+- Il file DB è escluso da git (`.gitignore`). Cancellalo per ripartire da zero
+- Su Fly.io il DB è su un volume persistente (`finance_data` → `/app/data`)
+
+---
+
+## Lingua
+
+Interfaccia disponibile in **italiano e inglese**, selezionabile dal dropdown nel menu.
+La scelta è salvata in `localStorage`.
+
+---
+
+## Stack tecnico
+
+| Layer | Tecnologia |
+|-------|-----------|
+| Framework | Next.js (App Router) |
+| UI | Tailwind CSS |
+| Database | SQLite via better-sqlite3 |
+| Dati di mercato | yahoo-finance2 |
+| Deploy | Fly.io (Docker) |
+| Auth | JWT cookie (bcrypt) |
+
+---
+
+## Deploy (Fly.io)
+
+```bash
+fly deploy
+```
+
+Il DB è su volume persistente. Per resettare il DB in produzione:
+```bash
+fly ssh console -C "rm /app/data/finance-bot.db*"
+fly machine restart
+```
+

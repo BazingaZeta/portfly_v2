@@ -10,6 +10,7 @@ const LINKS = [
   { href: "/", key: "nav.signals", icon: "📊" },
   { href: "/track", key: "nav.portfolio", icon: "💼" },
   { href: "/index", key: "nav.index", icon: "🎯" },
+  { href: "/momentum", key: "nav.momentum", icon: "⚡" },
   { href: "/autopilot", key: "nav.autopilot", icon: "🤖" },
   { href: "/performance", key: "nav.performance", icon: "📈" },
   { href: "/backtest", key: "nav.backtest", icon: "🧪" },
