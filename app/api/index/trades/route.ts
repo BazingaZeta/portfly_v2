@@ -1,0 +1,117 @@
+import { NextRequest, NextResponse } from "next/server";
+import {
+  getIndexTrades,
+  getOpenIndexBuys,
+  insertIndexTrade,
+  markIndexTradeClosed,
+} from "@/lib/db";
+import { fetchQuotes } from "@/lib/marketData";
+import type { Action } from "@/lib/types";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+export async function GET() {
+  const trades = getIndexTrades();
+  const openBuys = getOpenIndexBuys();
+  const tickers = [...new Set(openBuys.map((t) => t.ticker))];
+  const prices = tickers.length ? await fetchQuotes(tickers) : {};
+
+  // Aggregate open buys per ticker into positions with live P&L + stop status.
+  const byTicker = new Map<string, typeof openBuys>();
+  for (const b of openBuys) {
+    const arr = byTicker.get(b.ticker) ?? [];
+    arr.push(b);
+    byTicker.set(b.ticker, arr);
+  }
+  const positions = [...byTicker.entries()].map(([ticker, buys]) => {
+    const shares = buys.reduce((s, b) => s + b.shares, 0);
+    const costBasis = buys.reduce((s, b) => s + b.shares * b.price, 0);
+    const avgCost = costBasis / shares;
+    const currentPrice = prices[ticker] ?? avgCost;
+    const marketValue = shares * currentPrice;
+    const unrealizedPnl = marketValue - costBasis;
+    const latest = buys[buys.length - 1];
+    const stop = latest.stop;
+    const target = latest.target;
+    return {
+      indexKey: latest.indexKey,
+      ticker,
+      name: latest.name,
+      shares: +shares.toFixed(4),
+      avgCost: +avgCost.toFixed(2),
+      currentPrice: +currentPrice.toFixed(2),
+      marketValue: +marketValue.toFixed(2),
+      costBasis: +costBasis.toFixed(2),
+      unrealizedPnl: +unrealizedPnl.toFixed(2),
+      unrealizedPnlPct: costBasis ? +((unrealizedPnl / costBasis) * 100).toFixed(2) : 0,
+      stop,
+      target,
+      stopHit: stop != null && currentPrice <= stop,
+      targetHit: target != null && currentPrice >= target,
+    };
+  });
+  positions.sort((a, b) => b.marketValue - a.marketValue);
+
+  return NextResponse.json({ trades, positions });
+}
+
+export async function POST(req: NextRequest) {
+  const body = await req.json().catch(() => null);
+  if (!body) return NextResponse.json({ error: "Body non valido" }, { status: 400 });
+
+  const action = body.action as Action;
+  const ticker = String(body.ticker ?? "").toUpperCase().trim();
+  const shares = Number(body.shares);
+  const price = Number(body.price);
+
+  if (!ticker || (action !== "BUY" && action !== "SELL")) {
+    return NextResponse.json({ error: "ticker/action non validi" }, { status: 400 });
+  }
+  if (!Number.isFinite(shares) || shares <= 0 || !Number.isFinite(price) || price <= 0) {
+    return NextResponse.json({ error: "shares/price devono essere > 0" }, { status: 400 });
+  }
+
+  const executedAt = new Date().toISOString();
+
+  if (action === "BUY") {
+    const trade = insertIndexTrade({
+      indexKey: String(body.indexKey ?? ""),
+      ticker,
+      name: String(body.name ?? ticker),
+      action: "BUY",
+      shares,
+      price,
+      executedAt,
+      status: "open",
+      notes: body.notes ?? null,
+      target: body.target != null ? Number(body.target) : null,
+      stop: body.stop != null ? Number(body.stop) : null,
+      realizedPnl: null,
+    });
+    return NextResponse.json({ trade });
+  }
+
+  // SELL: close open buys for this ticker, record realized P&L.
+  const openBuys = getOpenIndexBuys().filter((t) => t.ticker === ticker);
+  const closedShares = openBuys.reduce((s, b) => s + b.shares, 0);
+  const costBasis = openBuys.reduce((s, b) => s + b.shares * b.price, 0);
+  const realizedPnl = closedShares > 0 ? +(price * closedShares - costBasis).toFixed(2) : null;
+  for (const b of openBuys) markIndexTradeClosed(b.id);
+
+  const trade = insertIndexTrade({
+    indexKey: openBuys[0]?.indexKey ?? String(body.indexKey ?? ""),
+    ticker,
+    name: openBuys[0]?.name ?? ticker,
+    action: "SELL",
+    shares: closedShares || shares,
+    price,
+    executedAt,
+    status: "closed",
+    notes: body.notes ?? null,
+    target: null,
+    stop: null,
+    realizedPnl,
+  });
+  return NextResponse.json({ trade, closed: openBuys.length, realizedPnl });
+}
