@@ -1,11 +1,15 @@
 import { NextResponse } from "next/server";
 import { getSellTrades } from "@/lib/db";
+import { getSession } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const sells = getSellTrades();
+  const session = await getSession();
+  if (!session) return NextResponse.json({ error: "Non autenticato" }, { status: 401 });
+
+  const sells = getSellTrades(session.userId);
 
   const closed = sells.map((t) => {
     const realized = t.realizedPnl ?? 0;

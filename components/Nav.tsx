@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useI18n } from "./I18nProvider";
 import { LangSwitcher } from "./LangSwitcher";
+import { useEffect, useState } from "react";
 
 const LINKS = [
   { href: "/", key: "nav.signals", icon: "📊" },
@@ -17,7 +18,22 @@ const LINKS = [
 
 export function Nav() {
   const pathname = usePathname();
+  const router = useRouter();
   const { t } = useI18n();
+  const [user, setUser] = useState<{ name: string; email: string } | null>(null);
+
+  useEffect(() => {
+    fetch("/api/auth/me")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d?.user) setUser(d.user); })
+      .catch(() => {});
+  }, []);
+
+  async function handleLogout() {
+    await fetch("/api/auth/me", { method: "POST" });
+    router.push("/login");
+  }
+
   return (
     <nav className="glass md:w-60 md:min-h-screen border-b md:border-b-0 md:border-r border-[var(--border)] px-4 py-4 md:py-6 flex md:flex-col gap-1 md:gap-2 items-center md:items-stretch md:sticky md:top-0 md:self-start">
       <div className="flex items-center gap-2.5 md:mb-7 mr-auto md:mr-0">
@@ -62,8 +78,21 @@ export function Nav() {
           );
         })}
       </div>
-      <div className="md:mt-auto md:pt-6">
+      <div className="md:mt-auto md:pt-6 flex md:flex-col gap-2 items-center md:items-stretch">
         <LangSwitcher />
+        {user && (
+          <div className="hidden md:flex flex-col gap-1 pt-3 border-t border-[var(--border)]">
+            <p className="text-xs text-[var(--muted)] truncate" title={user.email}>
+              👤 {user.name}
+            </p>
+            <button
+              onClick={handleLogout}
+              className="text-xs text-[var(--muted)] hover:text-[var(--negative)] text-left transition-colors"
+            >
+              Esci →
+            </button>
+          </div>
+        )}
       </div>
       <p className="hidden md:block text-[10px] leading-tight text-[var(--muted)] pt-4">
         {t("common.disclaimer")}

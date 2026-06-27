@@ -1,0 +1,28 @@
+# https://fly.io/docs/reference/configuration/
+app = "finance-bot"
+primary_region = "fra"   # Frankfurt — change if needed
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "3000"
+  NODE_ENV = "production"
+  # AUTH_SECRET is set via `fly secrets set AUTH_SECRET=...` — never hardcode here.
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "stop"     # stop when idle to save credit
+  auto_start_machines = true
+  min_machines_running = 0        # can be 1 if you want no cold starts
+
+[[mounts]]
+  source = "finance_data"
+  destination = "/app/data"
+  initial_size = "1gb"

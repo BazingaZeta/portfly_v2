@@ -22,6 +22,14 @@ export function db(): Database.Database {
   const database = new Database(DB_PATH);
   database.pragma("journal_mode = WAL");
   database.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS recommendations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       scan_date TEXT NOT NULL,
@@ -132,6 +140,19 @@ export function db(): Database.Database {
     database.exec(`ALTER TABLE trades ADD COLUMN profile TEXT`);
     // Existing trades belong to the default profile.
     database.exec(`UPDATE trades SET profile = 'Edo' WHERE profile IS NULL`);
+  }
+
+  // Migration: add user_id to trades (replacing the old profile text field).
+  if (!tradeCols.some((c) => c.name === "user_id")) {
+    database.exec(`ALTER TABLE trades ADD COLUMN user_id INTEGER`);
+  }
+
+  // Migration: add user_id to index_trades.
+  const idxCols = database.prepare(`PRAGMA table_info(index_trades)`).all() as {
+    name: string;
+  }[];
+  if (!idxCols.some((c) => c.name === "user_id")) {
+    database.exec(`ALTER TABLE index_trades ADD COLUMN user_id INTEGER`);
   }
 
   // Migration: add earnings columns to recommendations if missing.
@@ -313,13 +334,13 @@ function rowToTrade(r: TradeRow): Trade {
   };
 }
 
-export function insertTrade(t: Omit<Trade, "id">, profile = "Edo"): Trade {
+export function insertTrade(t: Omit<Trade, "id">, userId: number): Trade {
   const info = db()
     .prepare(
       `INSERT INTO trades
-        (recommendation_id, ticker, action, shares, price, executed_at, status, notes, closes_trade_id, realized_pnl, target, stop, profile)
+        (recommendation_id, ticker, action, shares, price, executed_at, status, notes, closes_trade_id, realized_pnl, target, stop, user_id)
        VALUES
-        (@recommendationId, @ticker, @action, @shares, @price, @executedAt, @status, @notes, @closesTradeId, @realizedPnl, @target, @stop, @profile)`
+        (@recommendationId, @ticker, @action, @shares, @price, @executedAt, @status, @notes, @closesTradeId, @realizedPnl, @target, @stop, @userId)`
     )
     .run({
       recommendationId: t.recommendationId,
@@ -334,32 +355,32 @@ export function insertTrade(t: Omit<Trade, "id">, profile = "Edo"): Trade {
       realizedPnl: t.realizedPnl ?? null,
       target: t.target ?? null,
       stop: t.stop ?? null,
-      profile,
+      userId,
     });
   return { ...t, id: Number(info.lastInsertRowid) };
 }
 
-/** All closed SELL trades (realized P&L history) for a profile, newest first. */
-export function getSellTrades(profile = "Edo"): Trade[] {
+/** All closed SELL trades (realized P&L history) for a user, newest first. */
+export function getSellTrades(userId: number): Trade[] {
   const rows = db()
-    .prepare(`SELECT * FROM trades WHERE action = 'SELL' AND profile = ? ORDER BY executed_at DESC`)
-    .all(profile) as TradeRow[];
+    .prepare(`SELECT * FROM trades WHERE action = 'SELL' AND user_id = ? ORDER BY executed_at DESC`)
+    .all(userId) as TradeRow[];
   return rows.map(rowToTrade);
 }
 
-export function getAllTrades(): Trade[] {
+export function getAllTrades(userId: number): Trade[] {
   const rows = db()
-    .prepare(`SELECT * FROM trades ORDER BY executed_at DESC`)
-    .all() as TradeRow[];
+    .prepare(`SELECT * FROM trades WHERE user_id = ? ORDER BY executed_at DESC`)
+    .all(userId) as TradeRow[];
   return rows.map(rowToTrade);
 }
 
-export function getOpenBuyTrades(): Trade[] {
+export function getOpenBuyTrades(userId: number): Trade[] {
   const rows = db()
     .prepare(
-      `SELECT * FROM trades WHERE action = 'BUY' AND status = 'open' ORDER BY executed_at ASC`
+      `SELECT * FROM trades WHERE action = 'BUY' AND status = 'open' AND user_id = ? ORDER BY executed_at ASC`
     )
-    .all() as TradeRow[];
+    .all(userId) as TradeRow[];
   return rows.map(rowToTrade);
 }
 
@@ -421,13 +442,13 @@ function rowToIndexTrade(r: IndexTradeRow): IndexTrade {
   };
 }
 
-export function insertIndexTrade(t: Omit<IndexTrade, "id">): IndexTrade {
+export function insertIndexTrade(t: Omit<IndexTrade, "id">, userId: number): IndexTrade {
   const info = db()
     .prepare(
       `INSERT INTO index_trades
-        (index_key, ticker, name, action, shares, price, executed_at, status, notes, target, stop, realized_pnl)
+        (index_key, ticker, name, action, shares, price, executed_at, status, notes, target, stop, realized_pnl, user_id)
        VALUES
-        (@indexKey, @ticker, @name, @action, @shares, @price, @executedAt, @status, @notes, @target, @stop, @realizedPnl)`
+        (@indexKey, @ticker, @name, @action, @shares, @price, @executedAt, @status, @notes, @target, @stop, @realizedPnl, @userId)`
     )
     .run({
       indexKey: t.indexKey,
@@ -442,21 +463,22 @@ export function insertIndexTrade(t: Omit<IndexTrade, "id">): IndexTrade {
       target: t.target ?? null,
       stop: t.stop ?? null,
       realizedPnl: t.realizedPnl ?? null,
+      userId,
     });
   return { ...t, id: Number(info.lastInsertRowid) };
 }
 
-export function getIndexTrades(): IndexTrade[] {
+export function getIndexTrades(userId: number): IndexTrade[] {
   const rows = db()
-    .prepare(`SELECT * FROM index_trades ORDER BY executed_at DESC`)
-    .all() as IndexTradeRow[];
+    .prepare(`SELECT * FROM index_trades WHERE user_id = ? ORDER BY executed_at DESC`)
+    .all(userId) as IndexTradeRow[];
   return rows.map(rowToIndexTrade);
 }
 
-export function getOpenIndexBuys(): IndexTrade[] {
+export function getOpenIndexBuys(userId: number): IndexTrade[] {
   const rows = db()
-    .prepare(`SELECT * FROM index_trades WHERE action = 'BUY' AND status = 'open' ORDER BY executed_at ASC`)
-    .all() as IndexTradeRow[];
+    .prepare(`SELECT * FROM index_trades WHERE action = 'BUY' AND status = 'open' AND user_id = ? ORDER BY executed_at ASC`)
+    .all(userId) as IndexTradeRow[];
   return rows.map(rowToIndexTrade);
 }
 

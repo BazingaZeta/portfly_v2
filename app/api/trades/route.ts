@@ -6,6 +6,7 @@ import {
   markTradeClosed,
   getRecommendationById,
 } from "@/lib/db";
+import { getSession } from "@/lib/auth";
 import { fetchQuotes } from "@/lib/marketData";
 import { computePositions } from "@/lib/positions";
 import type { Action } from "@/lib/types";
@@ -14,8 +15,12 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const trades = getAllTrades();
-  const openBuys = getOpenBuyTrades();
+  const session = await getSession();
+  if (!session) return NextResponse.json({ error: "Non autenticato" }, { status: 401 });
+  const userId = session.userId;
+
+  const trades = getAllTrades(userId);
+  const openBuys = getOpenBuyTrades(userId);
   const tickers = [...new Set(openBuys.map((t) => t.ticker))];
   const prices = tickers.length ? await fetchQuotes(tickers) : {};
   const positions = computePositions(openBuys, prices);
@@ -38,6 +43,10 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const session = await getSession();
+  if (!session) return NextResponse.json({ error: "Non autenticato" }, { status: 401 });
+  const userId = session.userId;
+
   const body = await req.json().catch(() => null);
   if (!body) {
     return NextResponse.json({ error: "Body non valido" }, { status: 400 });
@@ -75,12 +84,12 @@ export async function POST(req: NextRequest) {
       realizedPnl: null,
       target: rec?.target ?? null,
       stop: rec?.stop ?? null,
-    });
+    }, userId);
     return NextResponse.json({ trade });
   }
 
   // SELL: close open BUY positions for this ticker, record realized P&L.
-  const openBuys = getOpenBuyTrades().filter((t) => t.ticker === ticker);
+  const openBuys = getOpenBuyTrades(userId).filter((t) => t.ticker === ticker);
   const closedShares = openBuys.reduce((s, b) => s + b.shares, 0);
   const costBasis = openBuys.reduce((s, b) => s + b.shares * b.price, 0);
   // Realized = proceeds on the shares actually closed minus their cost basis.
@@ -105,6 +114,6 @@ export async function POST(req: NextRequest) {
     realizedPnl,
     target: null,
     stop: null,
-  });
+  }, userId);
   return NextResponse.json({ trade, closed: openBuys.length, realizedPnl });
 }

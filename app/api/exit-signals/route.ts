@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getOpenBuyTrades } from "@/lib/db";
+import { getSession } from "@/lib/auth";
 import { fetchCandles, fetchQuotes } from "@/lib/marketData";
 import { fetchTickerNews } from "@/lib/news";
 import { computeExitSignals, type ExitSignal } from "@/lib/exits";
@@ -9,7 +10,10 @@ export const dynamic = "force-dynamic";
 
 // Re-evaluates open positions and returns exit signals per ticker.
 export async function GET() {
-  const openBuys = getOpenBuyTrades();
+  const session = await getSession();
+  if (!session) return NextResponse.json({ error: "Non autenticato" }, { status: 401 });
+
+  const openBuys = getOpenBuyTrades(session.userId);
   const tickers = [...new Set(openBuys.map((t) => t.ticker))];
   if (tickers.length === 0) return NextResponse.json({ signals: [] });
 
