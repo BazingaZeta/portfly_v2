@@ -695,7 +695,406 @@ function LeaderCard({
   );
 }
 
-// ─── Main Page ────────────────────────────────────────────────────────────────
+// ─── Equity Chart (SVG) ───────────────────────────────────────────────────────
+
+function EquityChart({
+  strategy,
+  spy,
+  accountSize,
+}: {
+  strategy: { date: string; equity: number }[];
+  spy: { date: string; equity: number }[];
+  accountSize: number;
+}) {
+  if (strategy.length < 2) return null;
+
+  const W = 600;
+  const H = 200;
+  const PAD = { top: 16, right: 16, bottom: 28, left: 56 };
+  const innerW = W - PAD.left - PAD.right;
+  const innerH = H - PAD.top - PAD.bottom;
+
+  const allEquity = [...strategy.map((p) => p.equity), ...spy.map((p) => p.equity), accountSize];
+  const minE = Math.min(...allEquity) * 0.995;
+  const maxE = Math.max(...allEquity) * 1.005;
+
+  function toX(i: number, total: number) { return PAD.left + (i / (total - 1)) * innerW; }
+  function toY(v: number) { return PAD.top + ((maxE - v) / (maxE - minE)) * innerH; }
+
+  function polyline(pts: { date: string; equity: number }[], color: string, dashed = false) {
+    const d = pts.map((p, i) => `${toX(i, pts.length)},${toY(p.equity)}`).join(" ");
+    return (
+      <polyline
+        points={d}
+        fill="none"
+        stroke={color}
+        strokeWidth="1.8"
+        strokeDasharray={dashed ? "5,4" : undefined}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    );
+  }
+
+  // Drawdown fill under strategy curve
+  const ddPath = strategy
+    .map((p, i) => {
+      const x = toX(i, strategy.length);
+      const y = toY(p.equity);
+      const yBase = toY(Math.max(p.equity, Math.max(...strategy.slice(0, i + 1).map((q) => q.equity))));
+      return i === 0 ? `M${x},${yBase} L${x},${y}` : `L${x},${yBase} L${x},${y}`;
+    })
+    .join(" ");
+
+  // Y-axis ticks
+  const ticks = 4;
+  const yTicks = Array.from({ length: ticks + 1 }, (_, i) => minE + ((maxE - minE) * i) / ticks);
+
+  // X-axis labels (start / mid / end)
+  const xLabels = [
+    { i: 0, label: strategy[0].date.slice(0, 7) },
+    { i: Math.floor(strategy.length / 2), label: strategy[Math.floor(strategy.length / 2)]?.date.slice(0, 7) ?? "" },
+    { i: strategy.length - 1, label: strategy[strategy.length - 1].date.slice(0, 7) },
+  ];
+
+  return (
+    <div className="w-full overflow-x-auto">
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ maxWidth: W, minWidth: 300 }}>
+        {/* Grid lines */}
+        {yTicks.map((v, i) => (
+          <g key={i}>
+            <line x1={PAD.left} y1={toY(v)} x2={W - PAD.right} y2={toY(v)} stroke="var(--border)" strokeWidth="0.5" />
+            <text x={PAD.left - 4} y={toY(v) + 4} textAnchor="end" fontSize="9" fill="var(--muted)">
+              {v >= 10000 ? `$${(v / 1000).toFixed(0)}k` : `$${v.toFixed(0)}`}
+            </text>
+          </g>
+        ))}
+        {/* Baseline */}
+        <line x1={PAD.left} y1={toY(accountSize)} x2={W - PAD.right} y2={toY(accountSize)} stroke="var(--muted)" strokeWidth="0.8" strokeDasharray="3,3" />
+        {/* SPY */}
+        {spy.length > 1 && polyline(spy, "var(--warning)", true)}
+        {/* Strategy */}
+        {polyline(strategy, "var(--accent)")}
+        {/* X labels */}
+        {xLabels.map(({ i, label }) => (
+          <text key={i} x={toX(i, strategy.length)} y={H - 6} textAnchor="middle" fontSize="9" fill="var(--muted)">
+            {label}
+          </text>
+        ))}
+        {/* Legend */}
+        <line x1={PAD.left} y1={H - 6} x2={PAD.left + 16} y2={H - 6} stroke="var(--accent)" strokeWidth="2" />
+        <text x={PAD.left + 20} y={H - 3} fontSize="9" fill="var(--accent)">Strategia</text>
+        <line x1={PAD.left + 72} y1={H - 6} x2={PAD.left + 88} y2={H - 6} stroke="var(--warning)" strokeWidth="2" strokeDasharray="4,3" />
+        <text x={PAD.left + 92} y={H - 3} fontSize="9" fill="var(--warning)">SPY B&H</text>
+      </svg>
+    </div>
+  );
+}
+
+// ─── Backtest Panel ───────────────────────────────────────────────────────────
+
+interface BtSummary {
+  trades: number; wins: number; losses: number; winRate: number;
+  avgWin: number; avgLoss: number; profitFactor: number; expectancy: number;
+  maxDrawdown: number; totalReturn: number; cagr: number; finalEquity: number;
+  byOutcome: { target: number; stop: number; time: number };
+}
+interface BtTrade {
+  ticker: string; entryDate: string; entryPrice: number;
+  exitDate: string; exitPrice: number; pnl: number; returnPct: number; outcome: string;
+}
+interface BtResult {
+  summary: BtSummary;
+  equity: { date: string; equity: number }[];
+  spyEquity: { date: string; equity: number }[];
+  sharpe: number; calmar: number;
+  trades: BtTrade[];
+  signalsTotal: number; signalsTaken: number; tickersTested: number;
+  options: { accountSize: number; [k: string]: unknown };
+}
+
+function BacktestPanel({ indexKey }: { indexKey: string }) {
+  const { t } = useI18n();
+  const { accountSize, riskPct } = useRisk();
+
+  const today = new Date().toISOString().slice(0, 10);
+  const twoYearsAgo = new Date(Date.now() - 2 * 365.25 * 86_400_000).toISOString().slice(0, 10);
+
+  const [startDate, setStartDate] = useState(twoYearsAgo);
+  const [endDate, setEndDate] = useState(today);
+  const [account, setAccount] = useState(String(accountSize));
+  const [risk, setRisk] = useState(String(riskPct));
+  const [maxHold, setMaxHold] = useState("20");   // max hold bars
+  const [maxPositions, setMaxPositions] = useState("5");
+  const [topN, setTopN] = useState("5");           // top-N per scan
+  const [scanFreq, setScanFreq] = useState("5");  // scan every N bars (5 = weekly)
+  const [stopAtr, setStopAtr] = useState("2");
+  const [targetAtr, setTargetAtr] = useState("3");
+
+  const [running, setBtRunning] = useState(false);
+  const [btProgress, setBtProgress] = useState("");
+  const [result, setResult] = useState<BtResult | null>(null);
+  const [btError, setBtError] = useState<string | null>(null);
+
+  function runBt() {
+    setBtRunning(true);
+    setBtError(null);
+    setResult(null);
+    setBtProgress("Connessione…");
+
+    const qs = new URLSearchParams({
+      index: indexKey,
+      start: startDate,
+      end: endDate,
+      account,
+      risk,
+      hold: maxHold,
+      maxpos: maxPositions,
+      topN,
+      freq: scanFreq,
+      stopAtr,
+      targetAtr,
+    }).toString();
+
+    const es = new EventSource(`/api/momentum/backtest?${qs}`);
+    es.addEventListener("progress", (e) => setBtProgress(JSON.parse((e as MessageEvent).data).message ?? "…"));
+    es.addEventListener("complete", (e) => {
+      setResult(JSON.parse((e as MessageEvent).data));
+      es.close();
+      setBtRunning(false);
+    });
+    es.addEventListener("error", (e) => {
+      setBtError((e as MessageEvent).data ? JSON.parse((e as MessageEvent).data).message : "Errore");
+      es.close();
+      setBtRunning(false);
+    });
+  }
+
+  const s = result?.summary;
+
+  const spyFinalEquity = result?.spyEquity.length
+    ? result.spyEquity[result.spyEquity.length - 1].equity
+    : null;
+  const spyReturn = spyFinalEquity && result
+    ? (((spyFinalEquity - result.options.accountSize) / result.options.accountSize) * 100).toFixed(1)
+    : null;
+
+  return (
+    <section className="mb-8">
+      <div className="flex items-center gap-3 mb-4">
+        <h2 className="text-sm font-medium text-[var(--muted)] uppercase tracking-wide">
+          🧪 Backtest Momentum RS
+        </h2>
+      </div>
+
+      {/* Config */}
+      <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 mb-4">
+        <p className="text-xs text-[var(--muted)] mb-4">
+          Simula la strategia metatitolo su un intervallo personalizzato.
+          Stop/target dal canale di regressione, slippage 5bps, 1 posizione per ticker.
+        </p>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase text-[var(--muted)]">Data inizio</span>
+            <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="input text-sm" disabled={running} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase text-[var(--muted)]">Data fine</span>
+            <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="input text-sm" disabled={running} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase text-[var(--muted)]">Capitale ($)</span>
+            <input type="number" min="1000" step="1000" value={account} onChange={(e) => setAccount(e.target.value)} className="input text-sm" disabled={running} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase text-[var(--muted)]">Rischio/trade %</span>
+            <input type="number" min="0.1" max="5" step="0.1" value={risk} onChange={(e) => setRisk(e.target.value)} className="input text-sm" disabled={running} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase text-[var(--muted)]">Max posizioni</span>
+            <input type="number" min="1" max="20" step="1" value={maxPositions} onChange={(e) => setMaxPositions(e.target.value)} className="input text-sm" disabled={running} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase text-[var(--muted)]">Top-N per scansione</span>
+            <input type="number" min="1" max="15" step="1" value={topN} onChange={(e) => setTopN(e.target.value)} className="input text-sm" disabled={running} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase text-[var(--muted)]">Scansione (barre)</span>
+            <select value={scanFreq} onChange={(e) => setScanFreq(e.target.value)} className="input text-sm" disabled={running}>
+              <option value="1">1 (giornaliera)</option>
+              <option value="5">5 (settimanale)</option>
+              <option value="10">10 (bisettimanale)</option>
+              <option value="21">21 (mensile)</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase text-[var(--muted)]">Max hold (barre)</span>
+            <input type="number" min="5" max="120" step="5" value={maxHold} onChange={(e) => setMaxHold(e.target.value)} className="input text-sm" disabled={running} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase text-[var(--muted)]">Stop (× ATR)</span>
+            <input type="number" min="0.5" max="5" step="0.5" value={stopAtr} onChange={(e) => setStopAtr(e.target.value)} className="input text-sm" disabled={running} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase text-[var(--muted)]">Target (× ATR)</span>
+            <input type="number" min="1" max="8" step="0.5" value={targetAtr} onChange={(e) => setTargetAtr(e.target.value)} className="input text-sm" disabled={running} />
+          </label>
+        </div>
+
+        <button onClick={runBt} disabled={running} className="btn-primary">
+          {running ? "Backtest in corso…" : "🧪 Avvia backtest"}
+        </button>
+      </div>
+
+      {/* Progress */}
+      {running && (
+        <div className="mb-4 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 text-sm text-[var(--muted)]">
+          ⏳ {btProgress}
+        </div>
+      )}
+
+      {/* Error */}
+      {btError && (
+        <div className="mb-4 rounded-xl border border-[var(--negative)] bg-[var(--negative)]/10 p-3 text-sm text-[var(--negative)]">
+          {btError}
+        </div>
+      )}
+
+      {/* Results */}
+      {result && s && (
+        <>
+          {/* Coverage */}
+          <div className="mb-4 text-xs text-[var(--muted)] rounded-lg bg-[var(--surface)] border border-[var(--border)] p-3">
+            <span className="font-medium text-[var(--foreground)]">{result.tickersTested}</span> titoli testati ·{" "}
+            <span className="font-medium text-[var(--foreground)]">{result.signalsTaken}</span> trade eseguiti su{" "}
+            <span className="font-medium">{result.signalsTotal}</span> segnali ·{" "}
+            🎯 {s.byOutcome.target} target · ⛔ {s.byOutcome.stop} stop · ⏱ {s.byOutcome.time} a tempo
+          </div>
+
+          {/* Key metrics */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+            {[
+              { label: "Rendimento totale", value: s.totalReturn, suffix: "%", colored: true, bold: true },
+              { label: "SPY buy & hold", value: spyReturn ? parseFloat(spyReturn) : null, suffix: "%", colored: true },
+              { label: "CAGR", value: s.cagr, suffix: "%", colored: true },
+              { label: "Capitale finale", value: s.finalEquity, prefix: "$", isMoney: true },
+            ].map((m) => (
+              <div key={m.label} className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
+                <p className="text-[10px] uppercase text-[var(--muted)] mb-1">{m.label}</p>
+                <p className={`text-xl font-bold font-mono ${
+                  m.colored && m.value != null
+                    ? m.value >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]"
+                    : "text-[var(--foreground)]"
+                }`}>
+                  {m.value == null ? "—"
+                    : m.isMoney ? `$${m.value.toLocaleString()}`
+                    : `${m.value >= 0 && m.colored ? "+" : ""}${m.value}${m.suffix ?? ""}`}
+                </p>
+              </div>
+            ))}
+          </div>
+
+          {/* Risk metrics */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+            {[
+              { label: "Sharpe Ratio", value: result.sharpe, note: "> 1 buono, > 2 eccellente" },
+              { label: "Calmar Ratio", value: result.calmar, note: "CAGR / Max DD" },
+              { label: "Max Drawdown", value: `-${s.maxDrawdown}%`, note: "dal picco" },
+              { label: "Profit Factor", value: s.profitFactor, note: "> 1.5 = buon edge" },
+            ].map((m) => (
+              <div key={m.label} className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
+                <p className="text-[10px] uppercase text-[var(--muted)] mb-1">{m.label}</p>
+                <p className="text-xl font-bold font-mono text-[var(--foreground)]">{m.value}</p>
+                <p className="text-[10px] text-[var(--muted)] mt-0.5">{m.note}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* Trade stats */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+            {[
+              { label: "Win rate", value: `${s.winRate}%` },
+              { label: "Expectancy (R)", value: s.expectancy },
+              { label: "Media vincita", value: `+${s.avgWin}%` },
+              { label: "Media perdita", value: `${s.avgLoss}%` },
+            ].map((m) => (
+              <div key={m.label} className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3">
+                <p className="text-[10px] uppercase text-[var(--muted)] mb-1">{m.label}</p>
+                <p className="text-lg font-bold font-mono text-[var(--foreground)]">{m.value}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* Equity chart */}
+          <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 mb-6">
+            <p className="text-sm font-medium mb-3">📈 Equity curve — Strategia vs S&P 500 buy & hold</p>
+            <EquityChart
+              strategy={result.equity}
+              spy={result.spyEquity}
+              accountSize={result.options.accountSize}
+            />
+          </div>
+
+          {/* Trade log */}
+          {result.trades.length > 0 && (
+            <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] overflow-hidden mb-4">
+              <div className="px-4 py-3 border-b border-[var(--border)]">
+                <p className="text-sm font-medium">📋 Ultime operazioni simulate (max 200)</p>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-[var(--border)] text-[10px] uppercase text-[var(--muted)]">
+                      <th className="text-left px-3 py-2">Ticker</th>
+                      <th className="text-left px-3 py-2">Entrata</th>
+                      <th className="text-left px-3 py-2">Uscita</th>
+                      <th className="text-right px-3 py-2">Giorni</th>
+                      <th className="text-right px-3 py-2">Rendimento</th>
+                      <th className="text-right px-3 py-2">P&L</th>
+                      <th className="text-center px-3 py-2">Esito</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...result.trades].reverse().slice(0, 100).map((tr, i) => {
+                      const days = Math.round(
+                        (new Date(tr.exitDate).getTime() - new Date(tr.entryDate).getTime()) / 86_400_000
+                      );
+                      return (
+                        <tr key={i} className="border-b border-[var(--border)] last:border-0">
+                          <td className="px-3 py-2 font-semibold">{tr.ticker}</td>
+                          <td className="px-3 py-2 text-[var(--muted)]">{tr.entryDate}</td>
+                          <td className="px-3 py-2 text-[var(--muted)]">{tr.exitDate}</td>
+                          <td className="px-3 py-2 text-right font-mono">{days}</td>
+                          <td className={`px-3 py-2 text-right font-mono font-semibold ${tr.returnPct >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>
+                            {tr.returnPct >= 0 ? "+" : ""}{tr.returnPct.toFixed(2)}%
+                          </td>
+                          <td className={`px-3 py-2 text-right font-mono ${tr.pnl >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>
+                            {tr.pnl >= 0 ? "+" : ""}{money(tr.pnl)}
+                          </td>
+                          <td className="px-3 py-2 text-center">
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                              tr.outcome === "target" ? "bg-[var(--positive)]/15 text-[var(--positive)]"
+                              : tr.outcome === "stop" ? "bg-[var(--negative)]/15 text-[var(--negative)]"
+                              : "bg-[var(--muted)]/15 text-[var(--muted)]"
+                            }`}>
+                              {tr.outcome === "target" ? "🎯" : tr.outcome === "stop" ? "⛔" : "⏱"}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+
 
 export default function MomentumPage() {
   const { t } = useI18n();
@@ -846,6 +1245,9 @@ export default function MomentumPage() {
 
       {/* Trade history */}
       <TradeHistoryPanel trades={trades} />
+
+      {/* Backtest */}
+      <BacktestPanel indexKey={indexKey} />
 
       {/* Empty state */}
       {!leaders && !analyzing && (
