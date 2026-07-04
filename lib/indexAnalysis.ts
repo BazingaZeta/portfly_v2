@@ -33,14 +33,23 @@ export interface IndexAnalysis {
   leaders: LeaderSignal[]; // ranked by contribution to the index
 }
 
+// AUDIT 2026-07: signali BUY CONGELATI. Nel walk-forward 5-fold su 4,5 anni
+// (con equity marcata a mercato) NESSUNA struttura di uscita rende positiva questa
+// strategia: config attuale a canale → PF 0,89, 0/5 periodi positivi, maxDD 49%;
+// ATR 2/3, trailing e R²≥0,7 restano tutte a expectancy OOS ≤ 0. Finché una config
+// non supera i criteri (mediana OOS expectancy > 0, peggior fold PF ≥ 0,9), il
+// segnale massimo è WAIT: i setup si mostrano ma non si raccomanda l'ingresso.
+// Per riattivare: rimuovere il cap qui sotto dopo una validazione che regga OOS.
+const BUY_SIGNALS_FROZEN = true;
+
 function signalFor(ch: RegressionChannel, rsRising: boolean): { signal: IndexSignal; zone: LeaderSignal["zone"] } {
   const zone: LeaderSignal["zone"] = ch.z <= -0.5 ? "lower" : ch.z >= 1.0 ? "upper" : "mid";
   if (ch.trend !== "asc") return { signal: "AVOID", zone };
   // Must also be LEADING the index (relative strength rising), else just wait.
   if (!rsRising) return { signal: "WAIT", zone };
-  // Ascending + leading: buy unless overextended toward the upper band.
+  // Ascending + leading: would be BUY, but frozen pending a walk-forward that holds OOS.
   if (ch.z > 1.5) return { signal: "WAIT", zone };
-  return { signal: "BUY", zone };
+  return { signal: BUY_SIGNALS_FROZEN ? "WAIT" : "BUY", zone };
 }
 
 /** Relative-strength regression channel: stock close / index close, aligned by date. */

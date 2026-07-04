@@ -132,6 +132,17 @@ export async function db(): Promise<Client> {
         `CREATE TABLE IF NOT EXISTS whitelist (
           email TEXT PRIMARY KEY
         )`,
+        `CREATE TABLE IF NOT EXISTS sentiment_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          scan_date TEXT NOT NULL,
+          ticker TEXT NOT NULL,
+          tech_score REAL NOT NULL,
+          sentiment REAL NOT NULL,
+          news_count INTEGER NOT NULL,
+          final_score REAL NOT NULL,
+          created_at TEXT NOT NULL
+        )`,
+        `CREATE INDEX IF NOT EXISTS idx_sentiment_history_date ON sentiment_history(scan_date)`,
       ].map((sql) => ({ sql })),
       "write"
     );
@@ -241,6 +252,33 @@ export async function getRecommendationById(id: number): Promise<Recommendation 
   const client = await db();
   const r = await client.execute({ sql: `SELECT * FROM recommendations WHERE id = ?`, args: [id] });
   return r.rows.length ? rowToRec(toRecRow(r.rows[0] as Record<string, unknown>)) : null;
+}
+
+// ─── Sentiment history (for future validation of the news overlay) ────────────
+
+export interface SentimentSample {
+  scanDate: string;
+  ticker: string;
+  techScore: number;
+  sentiment: number;
+  newsCount: number;
+  finalScore: number;
+}
+
+/** Persist the sentiment snapshot for every technical finalist of a scan. */
+export async function insertSentimentHistory(samples: SentimentSample[]): Promise<void> {
+  if (samples.length === 0) return;
+  const client = await db();
+  const createdAt = new Date().toISOString();
+  await client.batch(
+    samples.map((s) => ({
+      sql: `INSERT INTO sentiment_history
+        (scan_date,ticker,tech_score,sentiment,news_count,final_score,created_at)
+        VALUES (?,?,?,?,?,?,?)`,
+      args: [s.scanDate, s.ticker, s.techScore, s.sentiment, s.newsCount, s.finalScore, createdAt],
+    })),
+    "write"
+  );
 }
 
 // ─── Trades ───────────────────────────────────────────────────────────────────

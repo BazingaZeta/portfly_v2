@@ -466,11 +466,19 @@ interface BtTrade {
   ticker: string; entryDate: string; entryPrice: number;
   exitDate: string; exitPrice: number; pnl: number; returnPct: number; outcome: string;
 }
+interface WfPeriod { start: string; end: string; summary: BtSummary; }
+interface WfReport {
+  periods: WfPeriod[];
+  medianExpectancy: number;
+  worstProfitFactor: number;
+  positivePeriods: number;
+}
 interface BtResult {
   summary: BtSummary;
   equity: { date: string; equity: number }[];
   spyEquity: { date: string; equity: number }[];
   sharpe: number; calmar: number;
+  walkForward?: WfReport;
   trades: BtTrade[];
   signalsTotal: number; signalsTaken: number; tickersTested: number;
   options: { accountSize: number; [k: string]: unknown };
@@ -487,12 +495,24 @@ function BacktestPanel({ indexKey }: { indexKey: string }) {
   const [endDate, setEndDate] = useState(today);
   const [account, setAccount] = useState(String(accountSize));
   const [risk, setRisk] = useState(String(riskPct));
-  const [maxHold, setMaxHold] = useState("20");   // max hold bars
+  // Default = config v3 validata walk-forward (ogni fold PF ≥ 1, 2021-2026).
+  const [maxHold, setMaxHold] = useState("120");  // time-stop lungo: col trailing si cavalca il winner
   const [maxPositions, setMaxPositions] = useState("5");
   const [topN, setTopN] = useState("5");           // top-N per scan
-  const [scanFreq, setScanFreq] = useState("5");  // scan every N bars (5 = weekly)
-  const [stopAtr, setStopAtr] = useState("2");
+  const [scanFreq, setScanFreq] = useState("10"); // scan every N bars
+  const [stopAtr, setStopAtr] = useState("2.5");
   const [targetAtr, setTargetAtr] = useState("3");
+  const [minR2, setMinR2] = useState("0.7");
+  const [maxZ, setMaxZ] = useState("0.5"); // "off" = nessun gate z
+  const [stopMode, setStopMode] = useState<"channel" | "atr">("channel");
+  const [useRegime, setUseRegime] = useState(true);
+  const [folds, setFolds] = useState("5");
+  const [trail, setTrail] = useState("3");   // trailing chandelier (× ATR), "off" = target fisso
+  const [trendExit, setTrendExit] = useState(true);
+  const [sizing, setSizing] = useState<"risk" | "equal">("equal");
+  const [w30, setW30] = useState("0.2");
+  const [w90, setW90] = useState("0.5");
+  const [w180, setW180] = useState("0.3");
 
   const [running, setBtRunning] = useState(false);
   const [btProgress, setBtProgress] = useState("");
@@ -517,6 +537,17 @@ function BacktestPanel({ indexKey }: { indexKey: string }) {
       freq: scanFreq,
       stopAtr,
       targetAtr,
+      r2: minR2,
+      maxZ, // "off" → nessun gate z
+      stopMode,
+      regime: useRegime ? "1" : "0",
+      folds,
+      w30,
+      w90,
+      w180,
+      trail,
+      trendExit: trendExit ? "1" : "0",
+      sizing,
     }).toString();
 
     const es = new EventSource(`/api/momentum/backtest?${qs}`);
@@ -553,8 +584,11 @@ function BacktestPanel({ indexKey }: { indexKey: string }) {
       {/* Config */}
       <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 mb-4">
         <p className="text-xs text-[var(--muted)] mb-4">
-          Simula la strategia metatitolo su un intervallo personalizzato.
-          Stop/target dal canale di regressione, slippage 5bps, 1 posizione per ticker.
+          Simula la strategia metatitolo su un intervallo personalizzato (storico ~5 anni, bear 2022
+          incluso). Default = <strong>config v3 validata walk-forward</strong> (ogni sotto-periodo
+          2021-2026 con PF ≥ 1): canale meta pulito R² ≥ 0.7 + z ≤ 0.5, regime SPY &gt; SMA200,
+          trailing 3 × ATR con uscita su rottura del trend (niente target fisso), equal weight.
+          Equity marcata a mercato ogni giorno, slippage 5 bps anche sugli stop.
         </p>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
           <label className="flex flex-col gap-1">
@@ -601,6 +635,70 @@ function BacktestPanel({ indexKey }: { indexKey: string }) {
           <label className="flex flex-col gap-1">
             <span className="text-[10px] uppercase text-[var(--muted)]">Target (× ATR)</span>
             <input type="number" min="1" max="8" step="0.5" value={targetAtr} onChange={(e) => setTargetAtr(e.target.value)} className="input text-sm" disabled={running} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase text-[var(--muted)]">Stop/target da</span>
+            <select value={stopMode} onChange={(e) => setStopMode(e.target.value as "channel" | "atr")} className="input text-sm" disabled={running}>
+              <option value="channel">Canale prezzo (live)</option>
+              <option value="atr">ATR</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase text-[var(--muted)]">Gate z metatitolo</span>
+            <select value={maxZ} onChange={(e) => setMaxZ(e.target.value)} className="input text-sm" disabled={running}>
+              <option value="0.5">z ≤ 0.5 (live)</option>
+              <option value="1">z ≤ 1.0</option>
+              <option value="1.5">z ≤ 1.5</option>
+              <option value="off">off (nessun gate)</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase text-[var(--muted)]">R² minimo canale</span>
+            <input type="number" min="0" max="0.95" step="0.05" value={minR2} onChange={(e) => setMinR2(e.target.value)} className="input text-sm" disabled={running} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase text-[var(--muted)]">Walk-forward (periodi)</span>
+            <select value={folds} onChange={(e) => setFolds(e.target.value)} className="input text-sm" disabled={running}>
+              <option value="0">off</option>
+              <option value="3">3</option>
+              <option value="5">5</option>
+            </select>
+          </label>
+          <label className="flex items-center gap-2 text-sm self-end pb-2">
+            <input type="checkbox" checked={useRegime} onChange={(e) => setUseRegime(e.target.checked)} disabled={running} />
+            <span className="text-xs">Regime (SPY &gt; SMA200)</span>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase text-[var(--muted)]">Trailing stop (× ATR)</span>
+            <select value={trail} onChange={(e) => setTrail(e.target.value)} className="input text-sm" disabled={running}>
+              <option value="off">off (target fisso)</option>
+              <option value="2.5">2.5</option>
+              <option value="3">3 (cavalca il winner)</option>
+              <option value="4">4 (largo)</option>
+            </select>
+          </label>
+          <label className="flex items-center gap-2 text-sm self-end pb-2">
+            <input type="checkbox" checked={trendExit} onChange={(e) => setTrendExit(e.target.checked)} disabled={running} />
+            <span className="text-xs">Esci se il trend meta si rompe</span>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase text-[var(--muted)]">Sizing posizioni</span>
+            <select value={sizing} onChange={(e) => setSizing(e.target.value as "risk" | "equal")} className="input text-sm" disabled={running}>
+              <option value="risk">Rischio fisso (× ATR)</option>
+              <option value="equal">Equal weight (capitale/N)</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase text-[var(--muted)]">Peso RS 30 barre</span>
+            <input type="number" min="0" max="1" step="0.05" value={w30} onChange={(e) => setW30(e.target.value)} className="input text-sm" disabled={running} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase text-[var(--muted)]">Peso RS 90 barre</span>
+            <input type="number" min="0" max="1" step="0.05" value={w90} onChange={(e) => setW90(e.target.value)} className="input text-sm" disabled={running} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase text-[var(--muted)]">Peso RS 180 barre</span>
+            <input type="number" min="0" max="1" step="0.05" value={w180} onChange={(e) => setW180(e.target.value)} className="input text-sm" disabled={running} />
           </label>
         </div>
 
@@ -687,6 +785,55 @@ function BacktestPanel({ indexKey }: { indexKey: string }) {
               </div>
             ))}
           </div>
+
+          {/* Walk-forward robustness */}
+          {result.walkForward && (
+            <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 mb-6">
+              <p className="text-sm font-medium mb-1">🔁 Walk-forward — tenuta per periodo</p>
+              <p className="text-[11px] text-[var(--muted)] mb-3">
+                Ogni periodo è simulato con capitale fresco: un edge vero regge in (quasi) tutti i
+                periodi, non solo sul totale.
+              </p>
+              <div className="grid grid-cols-3 gap-3 mb-3">
+                {[
+                  { label: "Mediana expectancy", value: `${result.walkForward.medianExpectancy >= 0 ? "+" : ""}${result.walkForward.medianExpectancy}R`, good: result.walkForward.medianExpectancy > 0 },
+                  { label: "Peggior Profit Factor", value: String(result.walkForward.worstProfitFactor), good: result.walkForward.worstProfitFactor >= 0.9 },
+                  { label: "Periodi positivi", value: `${result.walkForward.positivePeriods}/${result.walkForward.periods.length}`, good: result.walkForward.positivePeriods >= Math.ceil(result.walkForward.periods.length * 0.6) },
+                ].map((m) => (
+                  <div key={m.label} className="rounded-lg bg-[var(--surface-2)] p-2 text-center">
+                    <p className="text-[10px] uppercase text-[var(--muted)]">{m.label}</p>
+                    <p className={`text-base font-bold font-mono ${m.good ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>{m.value}</p>
+                  </div>
+                ))}
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-[var(--border)] text-[10px] uppercase text-[var(--muted)]">
+                      <th className="text-left px-2 py-1.5">Periodo</th>
+                      <th className="text-right px-2 py-1.5">Trade</th>
+                      <th className="text-right px-2 py-1.5">PF</th>
+                      <th className="text-right px-2 py-1.5">Exp (R)</th>
+                      <th className="text-right px-2 py-1.5">Max DD</th>
+                      <th className="text-right px-2 py-1.5">Rendimento</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {result.walkForward.periods.map((p, i) => (
+                      <tr key={i} className="border-b border-[var(--border)] last:border-0">
+                        <td className="px-2 py-1.5 font-mono text-[var(--muted)]">{p.start} → {p.end}</td>
+                        <td className="px-2 py-1.5 text-right font-mono">{p.summary.trades}</td>
+                        <td className={`px-2 py-1.5 text-right font-mono font-semibold ${p.summary.profitFactor >= 1 ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>{p.summary.profitFactor}</td>
+                        <td className={`px-2 py-1.5 text-right font-mono ${p.summary.expectancy >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>{p.summary.expectancy >= 0 ? "+" : ""}{p.summary.expectancy}</td>
+                        <td className="px-2 py-1.5 text-right font-mono text-[var(--negative)]">-{p.summary.maxDrawdown}%</td>
+                        <td className={`px-2 py-1.5 text-right font-mono ${p.summary.totalReturn >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>{p.summary.totalReturn >= 0 ? "+" : ""}{p.summary.totalReturn}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
 
           {/* Equity chart */}
           <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 mb-6">

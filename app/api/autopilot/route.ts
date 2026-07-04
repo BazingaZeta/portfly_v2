@@ -1,17 +1,34 @@
 import { NextRequest, NextResponse } from "next/server";
+import { after } from "next/server";
 import {
   runTick, getAutoState, getAutoLog, getAutoTrades, getAutoEquityCurve,
-  startAutopilot, resetAutopilot, getAutoStateRow,
+  startAutopilot, resetAutopilot, getAutoStateRow, getAutopilotStrategy,
+  type AutopilotStrategy,
 } from "@/lib/autopilotEngine";
 import { fetchQuotes, fetchMarketStatus } from "@/lib/marketData";
 import { AUTO_UNIVERSE } from "@/lib/autopilot";
+import { getAutoPositions } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
 
+// If nobody (cron or user) has ticked for this long, a page view triggers one.
+const LAZY_TICK_AFTER_MS = 12 * 60 * 60 * 1000;
+
 async function snapshot() {
-  const [prices, market] = await Promise.all([fetchQuotes(AUTO_UNIVERSE), fetchMarketStatus()]);
+  const strategyInfo = await getAutopilotStrategy();
+  const positions = await getAutoPositions();
+  const quoteList = [
+    ...new Set([
+      ...(strategyInfo.strategy === "rotation"
+        ? [strategyInfo.rotation.bull,
+           ...(strategyInfo.rotation.defensive !== "CASH" ? [strategyInfo.rotation.defensive] : [])]
+        : AUTO_UNIVERSE),
+      ...positions.map((p) => p.ticker),
+    ]),
+  ];
+  const [prices, market] = await Promise.all([fetchQuotes(quoteList), fetchMarketStatus()]);
   const [state, log, trades, equity] = await Promise.all([
     getAutoState((t) => prices[t] ?? 0),
     getAutoLog(80),
@@ -20,6 +37,7 @@ async function snapshot() {
   ]);
   return {
     state,
+    strategy: strategyInfo,
     market,
     log,
     trades,
@@ -28,8 +46,22 @@ async function snapshot() {
 }
 
 export async function GET() {
-  if (!(await getAutoStateRow())) {
+  const row = await getAutoStateRow();
+  if (!row) {
     return NextResponse.json({ state: { running: false }, log: [], trades: [], equity: [] });
+  }
+  // Lazy tick: keeps the paper account fresh even without a configured cron.
+  // Runs after the response is sent (serverless-safe via `after`).
+  const lastRun = row.last_run ? new Date(row.last_run).getTime() : 0;
+  if (Date.now() - lastRun > LAZY_TICK_AFTER_MS) {
+    after(async () => {
+      try {
+        await runTick(false);
+        console.log("[autopilot] lazy tick eseguito (ultimo run datato)");
+      } catch (e) {
+        console.error("[autopilot] lazy tick fallito:", e instanceof Error ? e.message : e);
+      }
+    });
   }
   return NextResponse.json(await snapshot());
 }
@@ -39,7 +71,14 @@ export async function POST(req: NextRequest) {
   const action = body?.action;
   let rebalanced = false;
   if (action === "start") {
-    await startAutopilot(Number(body.capital) > 0 ? Number(body.capital) : 10000);
+    const strategy: AutopilotStrategy = body.strategy === "rotation" ? "rotation" : "dual_momentum";
+    await startAutopilot(
+      Number(body.capital) > 0 ? Number(body.capital) : 10000,
+      strategy,
+      strategy === "rotation"
+        ? { bull: body.bull, defensive: body.defensive, smaPeriod: Number(body.sma) || undefined }
+        : undefined
+    );
     const r = await runTick(true); // immediately invest
     rebalanced = r.rebalanced;
   } else if (action === "run") {

@@ -17,6 +17,7 @@ export async function GET(req: NextRequest) {
     maxConcurrent: sp.get("maxc") ? Number(sp.get("maxc")) : undefined,
     slippageBps: sp.get("slip") ? Number(sp.get("slip")) : undefined,
     requireRs: sp.get("rs") ? sp.get("rs") === "1" : undefined,
+    folds: sp.get("folds") ? Number(sp.get("folds")) : undefined,
   };
 
   const encoder = new TextEncoder();
@@ -26,9 +27,13 @@ export async function GET(req: NextRequest) {
         controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
       try {
         const result = await runIndexBacktest(opts, (p: BacktestProgress) => send("progress", p));
-        for (const s of [result.summary, result.is, result.oos]) {
+        const summaries = [result.summary, result.is, result.oos,
+          ...(result.walkForward?.periods.map((p) => p.summary) ?? [])];
+        for (const s of summaries) {
           if (!isFinite(s.profitFactor)) (s as { profitFactor: number }).profitFactor = 999;
         }
+        if (result.walkForward && !isFinite(result.walkForward.worstProfitFactor))
+          result.walkForward.worstProfitFactor = 999;
         send("complete", result);
       } catch (err) {
         send("error", { message: err instanceof Error ? err.message : "Backtest fallito" });

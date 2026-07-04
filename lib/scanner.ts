@@ -18,18 +18,41 @@ export interface ScanProgress {
   message: string;
 }
 
+/** Sentiment snapshot for one technical finalist (persisted for later validation). */
+export interface SentimentSample {
+  scanDate: string;
+  ticker: string;
+  techScore: number;
+  sentiment: number;
+  newsCount: number;
+  finalScore: number;
+}
+
 export interface ScanResult {
   recommendations: Omit<Recommendation, "id">[];
   regime: MarketRegime | null;
+  sentimentSamples: SentimentSample[];
 }
 
 const EARNINGS_WARN_DAYS = 7; // flag/penalize signals with earnings within this window
 
 // Thresholds (tweak to taste). Exported so the backtest reuses the exact rules.
 export const TECH_GATE = 45; // min technical score to pull news + consider
-export const FINAL_GATE = 64; // min final score to emit a recommendation (high conviction only)
+// AUDIT 2026-07: alzata da 64 a 70. A 64 l'edge era ~nullo (walk-forward 5-fold su
+// 4,5 anni con equity marcata a mercato: PF 1,06, expectancy 0,058). A 70 il PF sale
+// a 1,32, CAGR 3,5→9,7%, maxDD 28,4→19,5%, mediana OOS expectancy 0,04→0,11 — sul
+// plateau robusto (68/70 solidi; 72 si assottiglia a <180 trade con fold fragili).
+export const FINAL_GATE = 70; // min final score to emit a recommendation (high conviction only)
 export const STOP_ATR = 1.5; // stop-loss distance in ATR
 export const TARGET_ATR = 2.5; // take-profit distance in ATR
+
+// A deterministic lexicon over a handful of headlines is noisy. Require a
+// minimum sample before acting on it, and shrink the weight toward zero when
+// there are few headlines (min(1, n/NEWS_FULL_WEIGHT_AT)). Negative news gets a
+// lower bar than positive — downside protection is worth acting on sooner.
+const MIN_NEWS_POSITIVE = 3;
+const MIN_NEWS_NEGATIVE = 2;
+const NEWS_FULL_WEIGHT_AT = 4;
 
 interface Candidate {
   ticker: string;
@@ -172,6 +195,7 @@ export async function runScan(
   const nowIso = new Date().toISOString();
   const scanDate = nowIso.slice(0, 10);
   const recs: Omit<Recommendation, "id">[] = [];
+  const sentimentSamples: SentimentSample[] = [];
 
   let newsDone = 0;
   await pool(candidates, 6, async (c) => {
@@ -209,25 +233,43 @@ export async function runScan(
       finalScore += w;
     }
 
-    if (sentiment > 0.2) {
-      const w = Math.round(sentiment * 18);
-      reasons.push({
-        code: "NEWS_POSITIVE",
-        label: `Notizie recenti positive (sentiment ${sentiment.toFixed(2)})`,
-        weight: w,
-      });
-      finalScore += w;
-    } else if (sentiment < -0.2) {
-      const w = Math.round(sentiment * 22); // negative
-      reasons.push({
-        code: "NEWS_NEGATIVE",
-        label: `Notizie recenti negative (sentiment ${sentiment.toFixed(2)})`,
-        weight: w,
-      });
-      finalScore += w; // w is negative
+    // Shrink the news weight toward zero when few headlines back it up.
+    const shrink = Math.min(1, news.length / NEWS_FULL_WEIGHT_AT);
+    if (sentiment > 0.2 && news.length >= MIN_NEWS_POSITIVE) {
+      const w = Math.round(sentiment * 18 * shrink);
+      if (w !== 0) {
+        reasons.push({
+          code: "NEWS_POSITIVE",
+          label: `Notizie recenti positive (sentiment ${sentiment.toFixed(2)}, ${news.length} titoli)`,
+          weight: w,
+        });
+        finalScore += w;
+      }
+    } else if (sentiment < -0.2 && news.length >= MIN_NEWS_NEGATIVE) {
+      const w = Math.round(sentiment * 22 * shrink); // negative
+      if (w !== 0) {
+        reasons.push({
+          code: "NEWS_NEGATIVE",
+          label: `Notizie recenti negative (sentiment ${sentiment.toFixed(2)}, ${news.length} titoli)`,
+          weight: w,
+        });
+        finalScore += w; // w is negative
+      }
     }
 
     finalScore = Math.max(0, Math.min(100, finalScore));
+
+    // Record every technical finalist's sentiment (even those we don't emit), so
+    // the news overlay's real predictive value can be measured over time.
+    sentimentSamples.push({
+      scanDate,
+      ticker: c.ticker,
+      techScore: c.techScore,
+      sentiment: +sentiment.toFixed(4),
+      newsCount: news.length,
+      finalScore: Math.round(finalScore),
+    });
+
     if (finalScore < FINAL_GATE) return;
 
     const ind = c.indicators;
@@ -261,5 +303,5 @@ export async function runScan(
     total,
     message: `Scan completata: ${recs.length} segnali`,
   });
-  return { recommendations: recs, regime };
+  return { recommendations: recs, regime, sentimentSamples };
 }

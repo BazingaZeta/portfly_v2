@@ -1,25 +1,32 @@
 /**
- * Momentum RS Backtest Engine — v2
- * ==================================
- * Strategy: weekly scan of the index constituents, enter the top-N stocks
+ * Momentum RS Backtest Engine — v3 (audit 2026-07)
+ * =================================================
+ * Strategy: periodic scan of the index constituents, enter the top-N stocks
  * by composite RS score (RS_30d × 0.2 + RS_90d × 0.5 + RS_180d × 0.3) that
- * also have an ascending meta-stock (stock/SPY) regression channel.
+ * also have an ascending, CLEAN meta-stock (stock/SPY) regression channel.
  *
- * Rationale for weekly scan: daily signals on 80 tickers produce thousands of
- * redundant entries (same stock, consecutive bars). A weekly scan concentrates
- * capital in the real leaders and drastically reduces churn.
+ * v3 defaults (validated walk-forward 5-fold 2021-2026, ogni fold PF ≥ 1.0,
+ * incluso il chop 2021-22; vicini di parametro tutti PF 1.24-1.42):
+ *   Entry:  scan ogni 10 barre → meta-channel asc + R² ≥ 0.7 + z ≤ 0.5,
+ *           solo con SPY > SMA200 (regime), top-N per RS composito
+ *   Sizing: equal weight (capitale/maxPositions) — il rischio fisso per trade
+ *           penalizzava proprio i leader più volatili
+ *   Exit:   trailing chandelier 3 × ATR (nessun target fisso: il vecchio
+ *           target a +6% medio troncava la coda destra dei winner),
+ *           più uscita su rottura del trend meta e time-stop lungo (120 barre)
  *
- * Entry:  weekly scan → meta-channel ascending + minR2 filter → top topN by RS
- * Stop:   entry − stopAtr × ATR(14)
- * Target: entry + targetAtr × ATR(14)
- * Exit:   first of stop / target / maxHoldBars / stock drops out of top-N
+ * Confronto onesto (2021-10 → 2026-07, SPY +72%): v3 +38% vs v2 +40% sul
+ * totale, ma v3 regge in OGNI sotto-periodo (worst fold PF 1.01 vs 0.87) e
+ * sull'ultimo biennio fa +79% vs +8% di v2. Nessuna delle due batte SPY
+ * buy&hold sull'intero ciclo: per quello vedi la Rotazione a leva.
  */
 
 import type { Candle } from "./types";
 import { indexByKey } from "./indices";
 import { fetchCandles } from "./marketData";
 import { regressionChannel } from "./regression";
-import type { BacktestSummary, BacktestProgress } from "./backtest";
+import type { BacktestSummary, BacktestProgress, WalkForwardPeriod, WalkForwardReport } from "./backtest";
+import { walkForwardStats } from "./backtest";
 
 // ─── Public types ──────────────────────────────────────────────────────────────
 
@@ -38,6 +45,18 @@ export interface MomentumBtOptions {
   maxHoldBars?: number;    // max bars to hold (time stop), default 20
   scanFreq?: number;       // how often to scan (bars), default 5 (weekly)
   topN?: number;           // top stocks per scan by RS score, default 5
+  folds?: number;          // walk-forward periods (0 = off)
+  maxZ?: number | null;    // only enter if meta-channel z <= maxZ (null = off; live UI uses 0.5)
+  stopMode?: "atr" | "channel"; // "channel" = price-channel bands like the live page (ATR fallback)
+  useRegime?: boolean;     // skip new entries while SPY < SMA200 (default false)
+  // Ride-the-winner exits (audit 2026-07: fixed targets truncate the right tail
+  // — avg win ~6% while index leaders do +100%+; these let winners run):
+  trailAtr?: number | null;   // chandelier trailing stop (× ATR at entry); disables the fixed target
+  exitOnTrendBreak?: boolean; // at each scan, exit positions whose meta-channel is no longer ascending
+  sizing?: "risk" | "equal";  // "equal" = equity/maxPositions per position (risk sizing shrinks the strongest movers)
+  w30?: number;            // composite RS weights (default 0.2 / 0.5 / 0.3)
+  w90?: number;
+  w180?: number;
 }
 
 export interface MomentumBtResult {
@@ -46,6 +65,7 @@ export interface MomentumBtResult {
   spyEquity: { date: string; equity: number }[];
   sharpe: number;
   calmar: number;
+  walkForward?: WalkForwardReport; // present when folds >= 2
   trades: MomentumBtTrade[];
   signalsTotal: number;
   signalsTaken: number;
@@ -85,6 +105,8 @@ interface OpenPosition {
   target: number;
   rps: number;
   shares: number;
+  atrAtEntry: number;   // for the chandelier trail
+  highSince: number;    // highest high seen so far (updated after exit checks)
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -114,25 +136,15 @@ function metaReturn(meta: number[], endIdx: number, lookback: number): number | 
   return ((meta[endIdx] - meta[startIdx]) / meta[startIdx]) * 100;
 }
 
-function rsScore(meta: number[], endIdx: number): number {
+function rsScore(meta: number[], endIdx: number, w30 = 0.2, w90 = 0.5, w180 = 0.3): number {
   const r30 = metaReturn(meta, endIdx, 30);
   const r90 = metaReturn(meta, endIdx, 90);
   const r180 = metaReturn(meta, endIdx, 180);
   let num = 0, den = 0;
-  if (r30 !== null) { num += r30 * 0.2; den += 0.2; }
-  if (r90 !== null) { num += r90 * 0.5; den += 0.5; }
-  if (r180 !== null) { num += r180 * 0.3; den += 0.3; }
+  if (r30 !== null) { num += r30 * w30; den += w30; }
+  if (r90 !== null) { num += r90 * w90; den += w90; }
+  if (r180 !== null) { num += r180 * w180; den += w180; }
   return den > 0 ? num / den : -Infinity;
-}
-
-function sharpeFromReturns(returns: number[]): number {
-  if (returns.length < 4) return 0;
-  const mean = returns.reduce((s, r) => s + r, 0) / returns.length;
-  const variance = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / returns.length;
-  const std = Math.sqrt(variance);
-  if (std === 0) return 0;
-  // Annualize: returns are per-trade, avg hold ~maxHoldBars days
-  return +((mean / std) * Math.sqrt(252 / 15)).toFixed(2);
 }
 
 function sharpeFromEquityCurve(curve: { date: string; equity: number }[]): number {
@@ -212,16 +224,31 @@ function simulate(
 
   // For each ticker, build a date→bar-index map
   const tickerDateIdx = new Map<string, Map<string, number>>();
+  const dataByTicker = new Map<string, TickerData>();
   for (const td of allData) {
     const m = new Map<string, number>();
     td.candles.forEach((c, i) => m.set(c.date, i));
     tickerDateIdx.set(td.ticker, m);
+    dataByTicker.set(td.ticker, td);
   }
 
-  let equity = opts.accountSize;
+  let equity = opts.accountSize; // realized (open positions valued at cost)
   let peak = equity;
   let maxDd = 0;
-  const curve: { date: string; equity: number }[] = [{ date: opts.startDate, equity }];
+  const curve: { date: string; equity: number }[] = [];
+
+  // SPY > SMA200 regime map (only past data at each date; used when useRegime).
+  const spyBull = new Map<string, boolean>();
+  if (opts.useRegime) {
+    const closes = spyCandles.map((c) => c.close);
+    let rollSum = 0;
+    for (let i = 0; i < spyCandles.length; i++) {
+      rollSum += closes[i];
+      if (i >= 200) rollSum -= closes[i - 200];
+      const sma200 = i >= 199 ? rollSum / 200 : NaN;
+      spyBull.set(spyCandles[i].date, isNaN(sma200) ? true : closes[i] > sma200);
+    }
+  }
 
   const openPositions = new Map<string, OpenPosition>();
   const cooldown = new Map<string, number>(); // ticker → bar index until which it's in cooldown
@@ -236,7 +263,7 @@ function simulate(
 
     // 1. Update open positions: check stop/target/time
     for (const [ticker, pos] of openPositions) {
-      const td = allData.find((d) => d.ticker === ticker);
+      const td = dataByTicker.get(ticker);
       if (!td) continue;
       const barIdxMap = tickerDateIdx.get(ticker)!;
       const barIdx = barIdxMap.get(date);
@@ -258,14 +285,30 @@ function simulate(
       else if (bar.high >= pos.target) { exitPrice = pos.target; outcome = "target"; }
       // Time stop
       else if (barsHeld >= opts.maxHoldBars) { exitPrice = bar.close; outcome = "time"; }
+      // Trend-break: at scan cadence, if the meta-channel is no longer an
+      // ascending clean trend, the entry thesis is gone → exit at close.
+      else if (opts.exitOnTrendBreak && di % opts.scanFreq === 0 && barIdx + 1 >= W + 20) {
+        const metaSlice = td.meta.slice(barIdx + 1 - W, barIdx + 1);
+        if (!metaSlice.some((v) => isNaN(v))) {
+          const ch = regressionChannel(metaSlice, 2);
+          if (!ch || ch.trend !== "asc" || ch.r2 < opts.minMetaR2) {
+            exitPrice = bar.close;
+            outcome = "time";
+          }
+        }
+      }
+
+      // Chandelier trail: update AFTER the exit checks, with today's high, so it
+      // only tightens the stop for future bars (no intraday look-ahead).
+      if (exitPrice === null && opts.trailAtr != null) {
+        pos.highSince = Math.max(pos.highSince, bar.high);
+        pos.stop = Math.max(pos.stop, pos.highSince - opts.trailAtr * pos.atrAtEntry);
+      }
 
       if (exitPrice !== null) {
-        const effExit = outcome === "stop" ? exitPrice : exitPrice * (1 - slip);
+        const effExit = exitPrice * (1 - slip);
         const pnl = pos.shares * (effExit - pos.entryPrice);
         equity += pnl;
-        peak = Math.max(peak, equity);
-        maxDd = Math.max(maxDd, peak > 0 ? (peak - equity) / peak : 0);
-        curve.push({ date, equity: +equity.toFixed(2) });
         const returnPct = ((effExit - pos.entryPrice) / pos.entryPrice) * 100;
         takenTrades.push({
           ticker,
@@ -284,12 +327,37 @@ function simulate(
       }
     }
 
+    // 1b. Daily mark-to-market: realized equity + unrealized P&L at close.
+    // Positions entered "tomorrow" (entryBar > di) are not yet on the book.
+    {
+      let unrealized = 0;
+      for (const pos of openPositions.values()) {
+        if (pos.entryBar > di) continue;
+        const barIdx = tickerDateIdx.get(pos.ticker)?.get(date);
+        if (barIdx == null) continue;
+        const px = dataByTicker.get(pos.ticker)!.candles[barIdx].close;
+        unrealized += pos.shares * (px - pos.entryPrice);
+      }
+      const mtm = equity + unrealized;
+      peak = Math.max(peak, mtm);
+      maxDd = Math.max(maxDd, peak > 0 ? (peak - mtm) / peak : 0);
+      curve.push({ date, equity: +mtm.toFixed(2) });
+    }
+
     // 2. Weekly scan: only look for entries every scanFreq bars
     if (di % opts.scanFreq !== 0) continue;
     if (openPositions.size >= opts.maxPositions) continue;
+    if (opts.useRegime && spyBull.get(date) === false) continue; // don't buy under SMA200
 
     // Score all tickers at this date
-    const candidates: { ticker: string; score: number; atr: number; price: number }[] = [];
+    const candidates: {
+      ticker: string;
+      score: number;
+      atr: number;
+      price: number;
+      chStop: number | null;
+      chTarget: number | null;
+    }[] = [];
 
     for (const td of allData) {
       if (openPositions.has(td.ticker)) continue;
@@ -305,17 +373,30 @@ function simulate(
       if (metaSlice.some((v) => isNaN(v))) continue;
       const metaCh = regressionChannel(metaSlice, 2);
       if (!metaCh || metaCh.trend !== "asc" || metaCh.r2 < opts.minMetaR2) continue;
+      // Optional live-parity gate: only buy near/below the channel mid band.
+      if (opts.maxZ != null && metaCh.z > opts.maxZ) continue;
 
       signalsTotal++;
 
       const atr = td.atrByIdx[barIdx];
       if (!(atr > 0)) continue;
 
-      const score = rsScore(td.meta, barIdx);
+      const score = rsScore(td.meta, barIdx, opts.w30, opts.w90, opts.w180);
       if (!isFinite(score)) continue;
 
       const price = td.candles[barIdx].close;
-      candidates.push({ ticker: td.ticker, score, atr, price });
+
+      // Live-parity stops: price-channel bands (40 bars, like the momentum page).
+      let chStop: number | null = null;
+      let chTarget: number | null = null;
+      if (opts.stopMode === "channel" && barIdx + 1 >= 40) {
+        const priceCh = regressionChannel(td.closes.slice(barIdx + 1 - 40, barIdx + 1), 2);
+        if (priceCh) {
+          chStop = Math.max(0, priceCh.lowerNow);
+          chTarget = priceCh.upperNow;
+        }
+      }
+      candidates.push({ ticker: td.ticker, score, atr, price, chStop, chTarget });
     }
 
     // Take top-N by RS score
@@ -335,8 +416,18 @@ function simulate(
       const entryPrice = entryBar.open * (1 + slip);
       if (!(entryPrice > 0)) continue;
 
-      const stop = entryPrice - opts.stopAtr * c.atr;
-      const target = entryPrice + opts.targetAtr * c.atr;
+      // Channel bands when requested and valid for this entry; ATR otherwise.
+      const useChannel =
+        opts.stopMode === "channel" &&
+        c.chStop != null &&
+        c.chTarget != null &&
+        c.chStop < entryPrice &&
+        c.chTarget > entryPrice;
+      const stop = useChannel ? c.chStop! : entryPrice - opts.stopAtr * c.atr;
+      // With a trailing stop there is no fixed target: let the winner run.
+      const target = opts.trailAtr != null
+        ? Infinity
+        : useChannel ? c.chTarget! : entryPrice + opts.targetAtr * c.atr;
       const rps = entryPrice - stop;
       if (!(rps > 0)) continue;
 
@@ -344,7 +435,11 @@ function simulate(
       const cash = equity - committed;
       if (cash <= 0) continue;
 
-      let shares = (equity * (opts.riskPct / 100)) / rps;
+      // "equal": full slot per position — risk sizing shrinks exactly the
+      // strongest (most volatile) leaders, capping their contribution.
+      let shares = opts.sizing === "equal"
+        ? equity / opts.maxPositions / entryPrice
+        : (equity * (opts.riskPct / 100)) / rps;
       if (shares * entryPrice > cash) shares = cash / entryPrice;
       if (shares <= 0) continue;
 
@@ -357,6 +452,8 @@ function simulate(
         target,
         rps,
         shares: +shares.toFixed(4),
+        atrAtEntry: c.atr,
+        highSince: entryPrice,
       });
       signalsTaken++;
     }
@@ -365,7 +462,7 @@ function simulate(
   // Close remaining open positions at endDate
   const lastDate = spyDates[spyDates.length - 1];
   for (const [ticker, pos] of openPositions) {
-    const td = allData.find((d) => d.ticker === ticker);
+    const td = dataByTicker.get(ticker);
     if (!td) continue;
     const barIdxMap = tickerDateIdx.get(ticker)!;
     const barIdx = barIdxMap.get(lastDate);
@@ -374,9 +471,6 @@ function simulate(
     const effExit = bar.close * (1 - slip);
     const pnl = pos.shares * (effExit - pos.entryPrice);
     equity += pnl;
-    peak = Math.max(peak, equity);
-    maxDd = Math.max(maxDd, peak > 0 ? (peak - equity) / peak : 0);
-    curve.push({ date: lastDate, equity: +equity.toFixed(2) });
     const returnPct = ((effExit - pos.entryPrice) / pos.entryPrice) * 100;
     takenTrades.push({
       ticker,
@@ -391,6 +485,12 @@ function simulate(
       outcome: "time",
     });
   }
+  // Final realized point (after force-close slippage)
+  if (curve.length && curve[curve.length - 1].date === lastDate) {
+    curve[curve.length - 1].equity = +equity.toFixed(2);
+  }
+  peak = Math.max(peak, equity);
+  maxDd = Math.max(maxDd, peak > 0 ? (peak - equity) / peak : 0);
 
   const wins = takenTrades.filter((t) => t.pnl > 0);
   const losses = takenTrades.filter((t) => t.pnl <= 0);
@@ -443,16 +543,29 @@ export async function runMomentumBacktest(
     maxPositions: opts.maxPositions ?? 5,
     slippageBps: opts.slippageBps ?? 5,
     metaWindow: opts.metaWindow ?? 60,
-    minMetaR2: opts.minMetaR2 ?? 0.5,
-    stopAtr: opts.stopAtr ?? 2,
+    // v3 defaults = config validata walk-forward (vedi header).
+    minMetaR2: opts.minMetaR2 ?? 0.7,
+    stopAtr: opts.stopAtr ?? 2.5,
     targetAtr: opts.targetAtr ?? 3,
-    maxHoldBars: opts.maxHoldBars ?? 20,
-    scanFreq: opts.scanFreq ?? 5,
+    maxHoldBars: opts.maxHoldBars ?? 120,
+    scanFreq: opts.scanFreq ?? 10,
     topN: opts.topN ?? 5,
+    folds: opts.folds ?? 0,
+    maxZ: opts.maxZ ?? 0.5,
+    stopMode: opts.stopMode ?? "channel",
+    useRegime: opts.useRegime ?? true,
+    trailAtr: opts.trailAtr === undefined ? 3 : opts.trailAtr,
+    exitOnTrendBreak: opts.exitOnTrendBreak ?? true,
+    sizing: opts.sizing ?? "equal",
+    w30: opts.w30 ?? 0.2,
+    w90: opts.w90 ?? 0.5,
+    w180: opts.w180 ?? 0.3,
   };
 
+  // 5y so bear markets (e.g. 2022) are reachable by startDate.
+  const HISTORY_YEARS = 5;
   onProgress?.({ current: 0, total: def.tickers.length, message: "Scarico dati benchmark…" });
-  const spyCandles = await fetchCandles(def.proxy, 3);
+  const spyCandles = await fetchCandles(def.proxy, HISTORY_YEARS);
   const spyByDate = new Map<string, number>(spyCandles.map((c) => [c.date, c.close]));
   if (spyCandles.length < resolved.metaWindow + 10)
     throw new Error("Dati SPY insufficienti");
@@ -462,7 +575,7 @@ export async function runMomentumBacktest(
   const allData: TickerData[] = [];
 
   await pool(def.tickers, 8, async (ticker) => {
-    const candles = await fetchCandles(ticker, 3);
+    const candles = await fetchCandles(ticker, HISTORY_YEARS);
     done++;
     onProgress?.({
       current: done,
@@ -484,12 +597,31 @@ export async function runMomentumBacktest(
   const calmar = summary.maxDrawdown > 0 ? +(summary.cagr / summary.maxDrawdown).toFixed(2) : 0;
   const spyEquity = buildSpyCurve(spyCandles, resolved.startDate, resolved.endDate, resolved.accountSize);
 
+  let walkForward: WalkForwardReport | undefined;
+  const windowDates = spyCandles
+    .map((c) => c.date)
+    .filter((d) => d >= resolved.startDate && d <= resolved.endDate);
+  if (resolved.folds >= 2 && windowDates.length >= resolved.folds * 40) {
+    const periods: WalkForwardPeriod[] = [];
+    for (let k = 0; k < resolved.folds; k++) {
+      const start = windowDates[Math.floor((windowDates.length * k) / resolved.folds)];
+      const end =
+        k === resolved.folds - 1
+          ? windowDates[windowDates.length - 1]
+          : windowDates[Math.floor((windowDates.length * (k + 1)) / resolved.folds) - 1];
+      const sub = simulate(allData, spyCandles, { ...resolved, startDate: start, endDate: end });
+      periods.push({ start, end, summary: sub.summary });
+    }
+    walkForward = walkForwardStats(periods);
+  }
+
   return {
     summary,
     equity,
     spyEquity,
     sharpe,
     calmar,
+    walkForward,
     trades: trades.slice(-200),
     signalsTotal,
     signalsTaken,
