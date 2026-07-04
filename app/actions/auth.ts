@@ -2,7 +2,7 @@
 
 import { redirect } from "next/navigation";
 import { createSession, deleteSession } from "@/lib/auth";
-import { getUserByEmail, createUser, verifyPassword, userCount } from "@/lib/authDb";
+import { getUserByEmail, createUser, verifyPassword, userCount, isEmailWhitelisted } from "@/lib/authDb";
 
 export type AuthState =
   | { errors?: { email?: string[]; password?: string[]; name?: string[]; form?: string[] } }
@@ -40,11 +40,9 @@ export async function signup(_state: AuthState, formData: FormData): Promise<Aut
     return { errors: { password: ["La password deve avere almeno 8 caratteri."] } };
   }
 
-  // Whitelist check — only allowed emails can register.
-  // If WHITELIST_EMAILS is not set, nobody can register (secure by default).
-  const allowedRaw = process.env.WHITELIST_EMAILS ?? "";
-  const allowed = allowedRaw.split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
-  if (!allowed.includes(email)) {
+  // Whitelist check — query the DB, not an env var.
+  const whitelisted = await isEmailWhitelisted(email);
+  if (!whitelisted) {
     return { errors: { form: ["Accesso su invito. Contatta l'amministratore."] } };
   }
 

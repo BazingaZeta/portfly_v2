@@ -1,4 +1,4 @@
-import { createUser as createDbUser, db, getUserByEmail as getDbUserByEmail } from "./db";
+import { createUser as createDbUser, db, getUserByEmail as getDbUserByEmail, isEmailWhitelisted as dbIsWhitelisted } from "./db";
 import bcrypt from "bcryptjs";
 
 export type User = { id: number; email: string; name: string };
@@ -24,4 +24,8 @@ export async function userCount(): Promise<number> {
 
 export function verifyPassword(password: string, hash: string): boolean {
   return bcrypt.compareSync(password, hash);
+}
+
+export async function isEmailWhitelisted(email: string): Promise<boolean> {
+  return dbIsWhitelisted(email);
 }

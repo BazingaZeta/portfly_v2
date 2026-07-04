@@ -129,9 +129,24 @@ export async function db(): Promise<Client> {
           ts TEXT PRIMARY KEY,
           equity REAL NOT NULL
         )`,
+        `CREATE TABLE IF NOT EXISTS whitelist (
+          email TEXT PRIMARY KEY
+        )`,
       ].map((sql) => ({ sql })),
       "write"
     );
+    // Seed whitelist from env var on first run (if table is empty)
+    const wl = await client.execute(`SELECT COUNT(*) as n FROM whitelist`);
+    if (Number(wl.rows[0]?.n ?? 0) === 0) {
+      const seeds = (process.env.WHITELIST_EMAILS ?? "")
+        .split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
+      if (seeds.length > 0) {
+        await client.batch(
+          seeds.map((email) => ({ sql: `INSERT OR IGNORE INTO whitelist (email) VALUES (?)`, args: [email] })),
+          "write"
+        );
+      }
+    }
     return client;
   })();
   return _ready;
@@ -440,4 +455,23 @@ export async function getAutoEquity(limit = 500): Promise<AutoEquity[]> {
   const client = await db();
   const r = await client.execute({ sql: `SELECT * FROM auto_equity ORDER BY ts ASC LIMIT ?`, args: [limit] });
   return r.rows.map((row) => { const ro = row as Record<string, unknown>; return { ts: s(ro.ts), equity: n(ro.equity) }; });
+}
+
+// ─── Whitelist ────────────────────────────────────────────────────────────────
+
+export async function isEmailWhitelisted(email: string): Promise<boolean> {
+  const client = await db();
+  const r = await client.execute({ sql: `SELECT 1 FROM whitelist WHERE email = ?`, args: [email.toLowerCase().trim()] });
+  return r.rows.length > 0;
+}
+
+export async function addToWhitelist(email: string): Promise<void> {
+  const client = await db();
+  await client.execute({ sql: `INSERT OR IGNORE INTO whitelist (email) VALUES (?)`, args: [email.toLowerCase().trim()] });
+}
+
+export async function getWhitelist(): Promise<string[]> {
+  const client = await db();
+  const r = await client.execute(`SELECT email FROM whitelist ORDER BY email`);
+  return r.rows.map((row) => s((row as Record<string, unknown>).email));
 }
