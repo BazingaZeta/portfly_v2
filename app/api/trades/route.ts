@@ -5,10 +5,12 @@ import {
   insertTrade,
   markTradeClosed,
   getRecommendationById,
+  getOpenIndexBuys,
+  getOpenMomentumBuys,
 } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 import { fetchQuotes } from "@/lib/marketData";
-import { computePositions } from "@/lib/positions";
+import { computePositions, computeIndexPositions } from "@/lib/positions";
 import type { Action } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -19,16 +21,31 @@ export async function GET() {
   if (!session) return NextResponse.json({ error: "Non autenticato" }, { status: 401 });
   const userId = session.userId;
 
-  const trades = await getAllTrades(userId);
-  const openBuys = await getOpenBuyTrades(userId);
-  const tickers = [...new Set(openBuys.map((t) => t.ticker))];
-  const prices = tickers.length ? await fetchQuotes(tickers) : {};
-  const positions = computePositions(openBuys, prices);
+  // Fetch open buys from all sources in parallel
+  const [trades, openBuys, openIndex, openMomentum] = await Promise.all([
+    getAllTrades(userId),
+    getOpenBuyTrades(userId),
+    getOpenIndexBuys(userId),
+    getOpenMomentumBuys(userId),
+  ]);
 
-  // Enrich each position with target/stop snapshotted on its open buy trades
-  // (most recent buy that carries them). Independent of the recommendation,
-  // so it survives re-scans.
-  for (const pos of positions) {
+  // Collect all unique tickers for live price fetch
+  const allTickers = [
+    ...new Set([
+      ...openBuys.map((t) => t.ticker),
+      ...openIndex.map((t) => t.ticker),
+      ...openMomentum.map((t) => t.ticker),
+    ]),
+  ];
+  const prices = allTickers.length ? await fetchQuotes(allTickers) : {};
+
+  // Build positions per source
+  const mainPositions = computePositions(openBuys, prices);
+  const indexPositions = computeIndexPositions(openIndex, prices, "index");
+  const momentumPositions = computeIndexPositions(openMomentum, prices, "momentum");
+
+  // Enrich main positions with target/stop from open buy trades
+  for (const pos of mainPositions) {
     const buys = openBuys
       .filter((b) => b.ticker === pos.ticker && b.target != null)
       .sort((a, b) => b.executedAt.localeCompare(a.executedAt));
@@ -38,6 +55,10 @@ export async function GET() {
       pos.stop = buys[0].stop;
     }
   }
+
+  // Merge all positions, sorted by market value descending
+  const positions = [...mainPositions, ...indexPositions, ...momentumPositions]
+    .sort((a, b) => b.marketValue - a.marketValue);
 
   return NextResponse.json({ trades, positions });
 }

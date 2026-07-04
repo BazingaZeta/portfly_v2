@@ -108,6 +108,7 @@ export interface IndexTrade {
 /** An open position derived from confirmed trades, with live P&L. */
 export interface Position {
   ticker: string;
+  name?: string;
   shares: number;
   avgCost: number;
   currentPrice: number;
@@ -116,6 +117,8 @@ export interface Position {
   unrealizedPnl: number;
   unrealizedPnlPct: number;
   openTradeIds: number[];
+  source: "main" | "index" | "momentum"; // which section originated this position
+  indexKey?: string; // for index/momentum positions
   // from the originating recommendation, when available
   recommendationId?: number | null;
   target?: number | null;

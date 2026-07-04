@@ -298,12 +298,19 @@ function SellModal({
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
 
+  // Route sell to the correct endpoint based on the position source
+  function sellEndpoint() {
+    if (position.source === "momentum") return "/api/momentum/trades";
+    if (position.source === "index") return "/api/index/trades";
+    return "/api/trades";
+  }
+
   async function submit() {
     const p = Number(price);
     if (!Number.isFinite(p) || p <= 0) return;
     setSaving(true);
     try {
-      await fetch("/api/trades", {
+      await fetch(sellEndpoint(), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -312,6 +319,7 @@ function SellModal({
           shares: position.shares,
           price: p,
           notes: notes || null,
+          indexKey: position.indexKey?.replace("MOMENTUM_", "") ?? "",
         }),
       });
       onDone();
@@ -417,8 +425,18 @@ function PositionRow({ p, spark, onSell }: { p: Position; spark?: number[]; onSe
         <div className="flex items-center gap-2">
           <LogoBadge ticker={p.ticker} size={22} />
           <span className="font-mono font-medium">{p.ticker}</span>
-          {nameFor(p.ticker) !== p.ticker && (
-            <span className="text-xs text-[var(--muted)] hidden sm:inline">{nameFor(p.ticker)}</span>
+          {(p.name ?? nameFor(p.ticker)) !== p.ticker && (
+            <span className="text-xs text-[var(--muted)] hidden sm:inline">{p.name ?? nameFor(p.ticker)}</span>
+          )}
+          {/* Source badge */}
+          {p.source !== "main" && (
+            <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+              p.source === "momentum"
+                ? "bg-[var(--accent)]/15 text-[var(--accent)]"
+                : "bg-[var(--warning)]/15 text-[var(--warning)]"
+            }`}>
+              {p.source === "momentum" ? "⚡ Momentum" : "🎯 Index"}
+            </span>
           )}
           {targetHit && (
             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--positive)]/15 text-[var(--positive)] font-medium">

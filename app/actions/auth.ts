@@ -40,6 +40,13 @@ export async function signup(_state: AuthState, formData: FormData): Promise<Aut
     return { errors: { password: ["La password deve avere almeno 8 caratteri."] } };
   }
 
+  // Whitelist check — only allowed emails can register.
+  const allowedRaw = process.env.WHITELIST_EMAILS ?? "";
+  const allowed = allowedRaw.split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
+  if (allowed.length > 0 && !allowed.includes(email)) {
+    return { errors: { form: ["Accesso su invito. Contatta l'amministratore."] } };
+  }
+
   if (await getUserByEmail(email)) {
     return { errors: { email: ["Questa email è già registrata."] } };
   }
