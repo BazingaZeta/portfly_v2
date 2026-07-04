@@ -8,7 +8,17 @@
  * - BUY: meta-stock channel ascending AND near lower band (mean-reversion within uptrend)
  * - WAIT: ascending but overextended or RS ambiguous
  * - AVOID: descending or flat meta-stock
+ *
+ * Nota (audit 2026-07, v3): logica validata walk-forward 5-fold 2021-2026 con
+ * equity marcata a mercato — ogni fold PF ≥ 1.0, incluso il chop 2021-22:
+ *   - entry: canale meta ascendente PULITO (R² ≥ 0.7) + z ≤ 0.5, con SPY > SMA200
+ *   - exit:  trailing 3 × ATR + rottura del trend meta (niente target fisso:
+ *            il target a +6% medio troncava la coda destra dei winner)
+ *   - sizing: equal weight — il rischio fisso per trade penalizzava i leader
+ * Il backtest (/api/momentum/backtest) usa questi default; gli stop/target
+ * mostrati qui sono i livelli iniziali indicativi del canale prezzo.
  */
+const BUY_MIN_R2 = 0.7; // canale meta "pulito": sotto, il trend è rumore (v3)
 
 import { fetchCandles } from "./marketData";
 import { regressionChannel, type RegressionChannel } from "./regression";
@@ -81,9 +91,11 @@ function signalFromChannel(ch: RegressionChannel): { signal: MomentumSignal; zon
   const zone: MomentumLeader["zone"] = ch.z <= -0.5 ? "lower" : ch.z >= 1.0 ? "upper" : "mid";
 
   if (ch.trend !== "asc") return { signal: "AVOID", zone };
+  // Trend ascendente ma rumoroso: non è il setup validato → aspetta.
+  if (ch.r2 < BUY_MIN_R2) return { signal: "WAIT", zone };
   // Ascending channel but overextended near the top
   if (ch.z > 1.5) return { signal: "WAIT", zone };
-  // Ascending, price near lower/mid band → best entry opportunity
+  // Ascending, clean, price near lower/mid band → best entry opportunity (v3)
   if (ch.z <= 0.5) return { signal: "BUY", zone };
   return { signal: "WAIT", zone };
 }

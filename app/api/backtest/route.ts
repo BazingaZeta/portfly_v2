@@ -16,6 +16,8 @@ export async function GET(req: NextRequest) {
     accountSize: sp.get("account") ? Number(sp.get("account")) : undefined,
     maxConcurrent: sp.get("maxc") ? Number(sp.get("maxc")) : undefined,
     slippageBps: sp.get("slip") ? Number(sp.get("slip")) : undefined,
+    folds: sp.get("folds") ? Number(sp.get("folds")) : undefined,
+    maxPortfolioRiskPct: sp.get("maxRisk") ? Number(sp.get("maxRisk")) : undefined,
   };
 
   const encoder = new TextEncoder();
@@ -26,9 +28,13 @@ export async function GET(req: NextRequest) {
       try {
         const result = await runBacktest((p: BacktestProgress) => send("progress", p), opts);
         // Infinity isn't valid JSON; coerce for transport.
-        for (const s of [result.summary, result.is, result.oos]) {
+        const summaries = [result.summary, result.is, result.oos,
+          ...(result.walkForward?.periods.map((p) => p.summary) ?? [])];
+        for (const s of summaries) {
           if (!isFinite(s.profitFactor)) (s as { profitFactor: number }).profitFactor = 999;
         }
+        if (result.walkForward && !isFinite(result.walkForward.worstProfitFactor))
+          result.walkForward.worstProfitFactor = 999;
         send("complete", result);
       } catch (err) {
         send("error", { message: err instanceof Error ? err.message : "Backtest fallito" });

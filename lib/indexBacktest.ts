@@ -2,7 +2,8 @@ import type { Candle } from "./types";
 import { indexByKey } from "./indices";
 import { fetchCandles } from "./marketData";
 import { regressionChannel } from "./regression";
-import type { BacktestSummary, BacktestProgress } from "./backtest";
+import type { BacktestSummary, BacktestProgress, WalkForwardPeriod, WalkForwardReport } from "./backtest";
+import { walkForwardStats } from "./backtest";
 
 export type ExitMode = "channel" | "atr" | "trail";
 
@@ -27,6 +28,7 @@ export interface IndexBacktestOptions extends Partial<StrategyConfig> {
   maxConcurrent?: number;
   slippageBps?: number;
   splitPct?: number;
+  folds?: number; // walk-forward periods (0 = off)
 }
 
 interface SimParams {
@@ -37,6 +39,7 @@ interface SimParams {
   maxConcurrent: number;
   slippageBps: number;
   splitPct: number;
+  folds: number;
 }
 
 const HISTORY_YEARS = 5;
@@ -201,14 +204,17 @@ function simulate(
   p: SimParams,
   startDate: string,
   endDate: string,
-  inclusiveEnd: boolean
+  inclusiveEnd: boolean,
+  calendar: string[],
+  closesByTicker: Map<string, Map<string, number>>
 ): { summary: BacktestSummary; equity: { date: string; equity: number }[]; taken: number } {
   const slip = p.slippageBps / 10000;
   const eligible = candidates
     .filter((c) => c.entryDate >= startDate && (inclusiveEnd ? c.entryDate <= endDate : c.entryDate < endDate))
-    .sort((a, b) => a.entryDate.localeCompare(b.entryDate));
+    // Deterministic order on same-day ties (array order depends on fetch order).
+    .sort((a, b) => a.entryDate.localeCompare(b.entryDate) || a.ticker.localeCompare(b.ticker));
 
-  let equity = p.accountSize;
+  let equity = p.accountSize; // realized (open positions valued at cost)
   let peak = equity;
   let maxDd = 0;
   const curve: { date: string; equity: number }[] = [];
@@ -230,30 +236,46 @@ function simulate(
           ret: ((o.effExit - o.effEntry) / o.effEntry) * 100,
           outcome: o.c.outcome,
         });
-        peak = Math.max(peak, equity);
-        if (peak > 0) maxDd = Math.max(maxDd, (peak - equity) / peak);
-        curve.push({ date: o.c.exitDate, equity: +equity.toFixed(2) });
         openTickers.delete(o.c.ticker);
         open.splice(k, 1);
       }
     }
   };
 
-  for (const c of eligible) {
-    realize(c.entryDate);
-    if (openTickers.has(c.ticker)) continue; // one position per ticker
-    if (open.length >= p.maxConcurrent) continue;
-    const effEntry = c.entryPrice * (1 + slip);
-    const rps = effEntry - c.stop;
-    if (!(rps > 0)) continue;
-    const committed = open.reduce((s, o) => s + o.shares * o.effEntry, 0);
-    const cash = equity - committed;
-    if (cash <= 0) continue;
-    let shares = (equity * (p.riskPct / 100)) / rps;
-    if (shares * effEntry > cash) shares = cash / effEntry;
-    if (shares <= 0) continue;
-    open.push({ c, shares, effEntry, effExit: c.exitPrice * (1 - slip) });
-    openTickers.add(c.ticker);
+  const days = calendar.filter(
+    (d) => d >= startDate && (inclusiveEnd ? d <= endDate : d < endDate)
+  );
+  let ei = 0;
+  for (const date of days) {
+    realize(date);
+
+    while (ei < eligible.length && eligible[ei].entryDate <= date) {
+      const c = eligible[ei++];
+      if (openTickers.has(c.ticker)) continue; // one position per ticker
+      if (open.length >= p.maxConcurrent) continue;
+      const effEntry = c.entryPrice * (1 + slip);
+      const rps = effEntry - c.stop;
+      if (!(rps > 0)) continue;
+      const committed = open.reduce((s, o) => s + o.shares * o.effEntry, 0);
+      const cash = equity - committed;
+      if (cash <= 0) continue;
+      let shares = (equity * (p.riskPct / 100)) / rps;
+      if (shares * effEntry > cash) shares = cash / effEntry;
+      if (shares <= 0) continue;
+      open.push({ c, shares, effEntry, effExit: c.exitPrice * (1 - slip) });
+      openTickers.add(c.ticker);
+    }
+
+    // Daily mark-to-market
+    let unrealized = 0;
+    for (const o of open) {
+      const px = closesByTicker.get(o.c.ticker)?.get(date);
+      if (px != null) unrealized += o.shares * (px - o.effEntry);
+    }
+    const mtm = equity + unrealized;
+    peak = Math.max(peak, mtm);
+    if (peak > 0) maxDd = Math.max(maxDd, (peak - mtm) / peak);
+    curve.push({ date, equity: +mtm.toFixed(2) });
   }
   realize("9999-99-99");
 
@@ -295,6 +317,7 @@ export interface IndexBacktestResult {
   is: BacktestSummary;
   oos: BacktestSummary;
   splitDate: string;
+  walkForward?: WalkForwardReport; // present when folds >= 2
   config: StrategyConfig & SimParams & { indexKey: string };
   tickersTested: number;
   signalsTotal: number;
@@ -306,7 +329,12 @@ async function loadEntries(
   channelWindow: number,
   lookbackDays: number,
   onProgress?: (p: BacktestProgress) => void
-): Promise<{ entries: RawEntry[]; tickersTested: number }> {
+): Promise<{
+  entries: RawEntry[];
+  tickersTested: number;
+  calendar: string[];
+  closesByTicker: Map<string, Map<string, number>>;
+}> {
   const def = indexByKey(indexKey);
   if (!def) throw new Error(`Indice sconosciuto: ${indexKey}`);
   onProgress?.({ current: 0, total: def.tickers.length, message: "Carico l'indice…" });
@@ -314,6 +342,7 @@ async function loadEntries(
   const idxByDate = new Map<string, number>(idxCandles.map((c) => [c.date, c.close]));
 
   const entries: RawEntry[] = [];
+  const closesByTicker = new Map<string, Map<string, number>>();
   let tickersTested = 0;
   let done = 0;
   let i = 0;
@@ -326,13 +355,14 @@ async function loadEntries(
         if (candles.length >= channelWindow + 20) {
           tickersTested++;
           entries.push(...generateRawEntries(ticker, candles, alignIndex(candles, idxByDate), channelWindow, lookbackDays));
+          closesByTicker.set(ticker, new Map(candles.map((c) => [c.date, c.close])));
         }
         done++;
         onProgress?.({ current: done, total: def.tickers.length, message: `Dati ${ticker} (${done}/${def.tickers.length})` });
       }
     })
   );
-  return { entries, tickersTested };
+  return { entries, tickersTested, calendar: idxCandles.map((c) => c.date), closesByTicker };
 }
 
 function splitDates(candidates: Candidate[], splitPct: number) {
@@ -367,17 +397,32 @@ export async function runIndexBacktest(
     maxConcurrent: options.maxConcurrent ?? 10,
     slippageBps: options.slippageBps ?? 5,
     splitPct: options.splitPct ?? 0.7,
+    folds: options.folds ?? 0,
   };
 
-  const { entries, tickersTested } = await loadEntries(options.indexKey, p.channelWindow, p.lookbackDays, onProgress);
+  const { entries, tickersTested, calendar, closesByTicker } = await loadEntries(options.indexKey, p.channelWindow, p.lookbackDays, onProgress);
   const candidates = buildCandidates(entries, cfg);
   const { first, last, split } = splitDates(candidates, p.splitPct);
 
-  const full = simulate(candidates, p, first, last, true);
-  const is = simulate(candidates, p, first, split, false);
-  const oos = simulate(candidates, p, split, last, true);
+  const full = simulate(candidates, p, first, last, true, calendar, closesByTicker);
+  const is = simulate(candidates, p, first, split, false, calendar, closesByTicker);
+  const oos = simulate(candidates, p, split, last, true, calendar, closesByTicker);
+
+  let walkForward: WalkForwardReport | undefined;
+  const entryDates = candidates.map((c) => c.entryDate).sort();
+  if (p.folds >= 2 && entryDates.length >= p.folds) {
+    const periods: WalkForwardPeriod[] = [];
+    for (let k = 0; k < p.folds; k++) {
+      const start = entryDates[Math.floor((entryDates.length * k) / p.folds)];
+      const isLast = k === p.folds - 1;
+      const end = isLast ? last : entryDates[Math.floor((entryDates.length * (k + 1)) / p.folds)];
+      periods.push({ start, end, summary: simulate(candidates, p, start, end, isLast, calendar, closesByTicker).summary });
+    }
+    walkForward = walkForwardStats(periods);
+  }
 
   return {
+    walkForward,
     summary: full.summary,
     equity: full.equity,
     is: is.summary,
@@ -426,20 +471,21 @@ export async function runIndexOptimize(
 ): Promise<{ rows: OptimizeRow[]; tickersTested: number }> {
   const p: SimParams = {
     lookbackDays: 504, channelWindow: 40, riskPct: 1, accountSize: 10000,
-    maxConcurrent: 10, slippageBps: 5, splitPct: 0.7,
+    maxConcurrent: 10, slippageBps: 5, splitPct: 0.7, folds: 0,
   };
-  const { entries, tickersTested } = await loadEntries(indexKey, p.channelWindow, p.lookbackDays, onProgress);
+  const { entries, tickersTested, calendar, closesByTicker } = await loadEntries(indexKey, p.channelWindow, p.lookbackDays, onProgress);
 
   const rows: OptimizeRow[] = GRID.map((cfg) => {
     const cands = buildCandidates(entries, cfg);
     const { first, last, split } = splitDates(cands, p.splitPct);
-    const full = simulate(cands, p, first, last, true).summary;
-    const is = simulate(cands, p, first, split, false).summary;
-    const oos = simulate(cands, p, split, last, true).summary;
+    const full = simulate(cands, p, first, last, true, calendar, closesByTicker).summary;
+    const is = simulate(cands, p, first, split, false, calendar, closesByTicker).summary;
+    const oos = simulate(cands, p, split, last, true, calendar, closesByTicker).summary;
     const holdsOos = oos.profitFactor >= 1.1 && oos.expectancy > 0 && oos.trades >= 20;
     return { config: cfg, full, is, oos, holdsOos };
   });
-  // Rank by out-of-sample expectancy (the honest criterion).
-  rows.sort((a, b) => b.oos.expectancy - a.oos.expectancy);
+  // Rank by IN-sample expectancy: selecting on OOS would make the holdout part
+  // of the selection and overstate it. OOS (and holdsOos) is confirmation only.
+  rows.sort((a, b) => b.is.expectancy - a.is.expectancy);
   return { rows, tickersTested };
 }

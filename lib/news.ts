@@ -27,15 +27,66 @@ const NEGATIVE = [
   "fine", "fined", "crash", "crashes", "slashes", "slashed",
 ];
 
+// Words that flip the polarity of the sentiment term that follows them, within
+// a short window. A deterministic lexicon is blind to negation otherwise:
+// "no longer fears bankruptcy" would read as strongly negative.
+const NEGATORS = new Set([
+  "no", "not", "never", "without", "cannot", "cant",
+  "avoid", "avoids", "avoided",
+]);
+const NEGATION_WINDOW = 3; // tokens after a negator whose polarity is inverted
+
+// Bigrams the unigram lexicon gets wrong. Finance context: a "rate cut" or
+// "buyback" is bullish; "guidance cut" or "job cuts" is bearish. Scored as a
+// single unit (and their component words are skipped).
+const BIGRAMS: Record<string, number> = {
+  "rate cut": 1, "rate cuts": 1, "cost cuts": 1, "tax cut": 1, "tax cuts": 1,
+  "share buyback": 1, "debt reduction": 1,
+  "guidance cut": -1, "job cuts": -1, "job cut": -1, "dividend cut": -1,
+  "guidance cuts": -1, "profit warning": -1, "price cut": -1, "price cuts": -1,
+  "growth concerns": -1, "recession fears": -1,
+};
+
+const POSITIVE_SET = new Set(POSITIVE);
+const NEGATIVE_SET = new Set(NEGATIVE);
+
 /** Score a headline in [-1, 1] from positive/negative keyword counts. */
 export function scoreSentiment(text: string): number {
-  const words = text.toLowerCase().match(/[a-z']+/g) ?? [];
+  const lower = text.toLowerCase();
+  const words = lower.match(/[a-z']+/g) ?? [];
   let pos = 0;
   let neg = 0;
-  for (const w of words) {
-    if (POSITIVE.includes(w)) pos++;
-    if (NEGATIVE.includes(w)) neg++;
+
+  // 1. Bigrams first; remember which token positions they consumed.
+  const consumed = new Set<number>();
+  for (let i = 0; i < words.length - 1; i++) {
+    const bg = `${words[i]} ${words[i + 1]}`;
+    const score = BIGRAMS[bg];
+    if (score !== undefined) {
+      if (score > 0) pos++; else neg++;
+      consumed.add(i);
+      consumed.add(i + 1);
+      i++; // don't overlap bigrams
+    }
   }
+
+  // 2. Unigrams, with a negation flip if a negator precedes within the window.
+  for (let i = 0; i < words.length; i++) {
+    if (consumed.has(i)) continue;
+    const w = words[i];
+    let polarity = 0;
+    if (POSITIVE_SET.has(w)) polarity = 1;
+    else if (NEGATIVE_SET.has(w)) polarity = -1;
+    if (polarity === 0) continue;
+
+    let negated = false;
+    for (let j = Math.max(0, i - NEGATION_WINDOW); j < i; j++) {
+      if (NEGATORS.has(words[j])) { negated = true; break; }
+    }
+    const eff = negated ? -polarity : polarity;
+    if (eff > 0) pos++; else neg++;
+  }
+
   if (pos + neg === 0) return 0;
   return (pos - neg) / (pos + neg);
 }

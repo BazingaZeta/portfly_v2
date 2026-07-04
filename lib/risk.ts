@@ -45,3 +45,31 @@ export function openRisk(
   if (stop == null) return 0;
   return Math.max(0, (reference - stop) * shares);
 }
+
+/** Total open risk across a set of positions (sum of per-position risk-to-stop). */
+export function portfolioOpenRisk(
+  positions: { shares: number; reference: number; stop: number | null | undefined }[]
+): number {
+  return positions.reduce((s, p) => s + openRisk(p.shares, p.reference, p.stop), 0);
+}
+
+/**
+ * Cap the size of a new position so that total portfolio risk-to-stop
+ * (existing open risk + this trade's risk) does not exceed `maxPortfolioPct`%
+ * of equity. Returns the allowed share count (0 if no budget is left).
+ * Correlation between positions isn't modelled — this is a hard aggregate
+ * ceiling, the first line of defence against stacking many correlated longs.
+ */
+export function riskCappedShares(
+  desiredShares: number,
+  riskPerShare: number,
+  equity: number,
+  currentOpenRisk: number,
+  maxPortfolioPct: number
+): number {
+  if (!(riskPerShare > 0) || !(equity > 0)) return 0;
+  const budget = (equity * maxPortfolioPct) / 100 - currentOpenRisk;
+  if (budget <= 0) return 0;
+  const maxByRisk = budget / riskPerShare;
+  return Math.max(0, Math.min(desiredShares, maxByRisk));
+}
