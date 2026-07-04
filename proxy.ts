@@ -6,7 +6,9 @@ const SECRET = new TextEncoder().encode(
 );
 
 // Routes that don't require authentication.
-const PUBLIC_PATHS = ["/login", "/api/auth"];
+// /api/autopilot/tick is called by Vercel Cron (no session cookie) and is
+// protected inside the handler by CRON_SECRET.
+const PUBLIC_PATHS = ["/login", "/api/auth", "/api/autopilot/tick"];
 
 function isPublic(pathname: string): boolean {
   return PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + "/"));

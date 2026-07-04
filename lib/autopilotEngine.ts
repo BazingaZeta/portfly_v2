@@ -11,8 +11,44 @@ import {
   upsertAutoPosition,
   upsertAutoState,
 } from "./db";
+import { getMeta, setMeta } from "./db";
 import { computeStrategy, fetchUniverseCandles, AUTO_UNIVERSE, AUTO_NAMES } from "./autopilot";
-import { fetchQuotes } from "./marketData";
+import {
+  rotationDecision,
+  normalizeRotationConfig,
+  ASSET_NAMES,
+  DEFAULT_ROTATION,
+  type RotationConfig,
+} from "./leverageRotation";
+import { fetchQuotes, fetchCandles } from "./marketData";
+
+export type AutopilotStrategy = "dual_momentum" | "rotation";
+
+const STRATEGY_LABELS: Record<AutopilotStrategy, string> = {
+  dual_momentum: "Dual Momentum ETF (mensile)",
+  rotation: "Rotazione a leva (SPY vs SMA200)",
+};
+
+function nameFor(ticker: string): string {
+  return AUTO_NAMES[ticker] ?? ASSET_NAMES[ticker] ?? ticker;
+}
+
+export interface AutopilotStrategyInfo {
+  strategy: AutopilotStrategy;
+  label: string;
+  rotation: RotationConfig;
+}
+
+export async function getAutopilotStrategy(): Promise<AutopilotStrategyInfo> {
+  const raw = (await getMeta("autopilot_strategy")) as AutopilotStrategy | null;
+  const strategy: AutopilotStrategy = raw === "rotation" ? "rotation" : "dual_momentum";
+  let rotation = DEFAULT_ROTATION;
+  try {
+    const cfg = await getMeta("autopilot_rotation_config");
+    if (cfg) rotation = normalizeRotationConfig(JSON.parse(cfg));
+  } catch { /* default */ }
+  return { strategy, label: STRATEGY_LABELS[strategy], rotation };
+}
 
 export interface AutoPosition {
   ticker: string;
@@ -56,9 +92,17 @@ export async function getAutoStateRow(): Promise<StateRow | null> {
   };
 }
 
-export async function startAutopilot(initialCapital = 10000): Promise<void> {
+export async function startAutopilot(
+  initialCapital = 10000,
+  strategy: AutopilotStrategy = "dual_momentum",
+  rotationCfg?: Partial<RotationConfig>
+): Promise<void> {
   const now = new Date().toISOString();
   await resetDbAutoState();
+  await setMeta("autopilot_strategy", strategy);
+  if (strategy === "rotation") {
+    await setMeta("autopilot_rotation_config", JSON.stringify(normalizeRotationConfig(rotationCfg)));
+  }
   await upsertAutoState({
     cash: initialCapital,
     initial_capital: initialCapital,
@@ -66,7 +110,11 @@ export async function startAutopilot(initialCapital = 10000): Promise<void> {
     last_run: null,
     last_rebalance_month: null,
   });
-  await log(now.slice(0, 19), "start", `Autopilot avviato con capitale virtuale ${initialCapital}$.`);
+  await log(
+    now.slice(0, 19),
+    "start",
+    `Autopilot avviato con capitale virtuale ${initialCapital}$ — strategia: ${STRATEGY_LABELS[strategy]}.`
+  );
 }
 
 export async function resetAutopilot(): Promise<void> {
@@ -97,31 +145,68 @@ export async function runTick(force = false): Promise<{ ran: boolean; rebalanced
   }
   const runId = new Date().toISOString().slice(0, 19);
   const now = new Date().toISOString();
-  await log(runId, "run", "▶ Avvio ciclo: scarico i dati dell'universo ETF…");
 
-  const candles = await fetchUniverseCandles(2);
-  const prices = await fetchQuotes(AUTO_UNIVERSE);
-  const priceOf = (t: string) => prices[t] ?? candles[t]?.[candles[t].length - 1]?.close ?? 0;
+  const stratInfo = await getAutopilotStrategy();
+  const positions = await positionsMap();
+  const currentPositions = { ...positions };
 
-  const decision = computeStrategy(candles);
+  let decision: { targets: Record<string, number>; steps: string[] };
+  let priceOf: (t: string) => number;
+
+  if (stratInfo.strategy === "rotation") {
+    await log(runId, "run", `▶ Avvio ciclo (${stratInfo.label}): scarico SPY e quote…`);
+    const cfg = stratInfo.rotation;
+    const spy = await fetchCandles("SPY", 2);
+    decision = rotationDecision(spy, cfg);
+    const quoteList = [
+      ...new Set([
+        cfg.bull,
+        ...(cfg.defensive !== "CASH" ? [cfg.defensive] : []),
+        ...Object.keys(positions),
+      ]),
+    ];
+    const prices = await fetchQuotes(quoteList);
+    const spyLast = spy[spy.length - 1]?.close ?? 0;
+    priceOf = (t) => prices[t] ?? (t === "SPY" ? spyLast : 0);
+  } else {
+    await log(runId, "run", "▶ Avvio ciclo: scarico i dati dell'universo ETF…");
+    const candles = await fetchUniverseCandles(2);
+    const prices = await fetchQuotes(AUTO_UNIVERSE);
+    priceOf = (t) => prices[t] ?? candles[t]?.[candles[t].length - 1]?.close ?? 0;
+    decision = computeStrategy(candles);
+  }
   for (const s of decision.steps) await log(runId, "analysis", s);
 
   // Current month for monthly rebalance cadence.
   const month = now.slice(0, 7);
-  const positions = await positionsMap();
-  const currentPositions = { ...positions };
 
   // Trend-break guard: if a held asset is no longer selected AND fell out of the
   // top/trend, we exit it immediately (risk management) even mid-month.
   const heldOutOfTarget = Object.keys(positions).some((t) => !(t in decision.targets));
+  // Rotation only: a regime flip also shows up as a target we don't hold yet
+  // (e.g. all-cash defensive → bull). Daily cadence, no monthly rebalance needed.
+  const targetNotHeld = Object.keys(decision.targets).some((t) => !(t in positions));
   const isNewMonth = state.last_rebalance_month !== month;
   const firstRun = Object.keys(positions).length === 0 && state.last_rebalance_month == null;
-  const shouldRebalance = force || firstRun || isNewMonth || heldOutOfTarget;
+  const shouldRebalance =
+    stratInfo.strategy === "rotation"
+      ? force || firstRun || heldOutOfTarget || targetNotHeld
+      : force || firstRun || isNewMonth || heldOutOfTarget;
 
   let rebalanced = false;
   if (shouldRebalance) {
     rebalanced = true;
-    await log(runId, "decision", isNewMonth || firstRun ? "Ribilancio mensile programmato." : "Ribilancio anticipato: un asset in portafoglio non è più tra i target (rottura trend).");
+    await log(
+      runId,
+      "decision",
+      stratInfo.strategy === "rotation"
+        ? firstRun
+          ? "Prima allocazione secondo il regime attuale."
+          : "Cambio di regime: ruoto il portafoglio verso il nuovo target."
+        : isNewMonth || firstRun
+        ? "Ribilancio mensile programmato."
+        : "Ribilancio anticipato: un asset in portafoglio non è più tra i target (rottura trend)."
+    );
 
     // Compute current equity (cash + positions marked to market).
     let invested = 0;
@@ -136,7 +221,7 @@ export async function runTick(force = false): Promise<{ ran: boolean; rebalanced
         await upsertAutoPosition(t, 0, p.avgCost);
         delete currentPositions[t];
         await recordTrade(t, "SELL", p.shares, px, "Uscita: non più tra i target / rottura trend");
-        await log(runId, "trade", `VENDO ${t} (${AUTO_NAMES[t] ?? t}): ${p.shares.toFixed(2)} @ ${px.toFixed(2)}`);
+        await log(runId, "trade", `VENDO ${t} (${nameFor(t)}): ${p.shares.toFixed(2)} @ ${px.toFixed(2)}`);
       }
     }
     for (const [t, w] of Object.entries(decision.targets)) {
@@ -151,8 +236,8 @@ export async function runTick(force = false): Promise<{ ran: boolean; rebalanced
       if (diffShares > 0) {
         cash -= diffShares * px;
         await upsertPosition(currentPositions, t, diffShares, px);
-        await recordTrade(t, "BUY", diffShares, px, "Allocazione target dual-momentum");
-        await log(runId, "trade", `COMPRO ${t} (${AUTO_NAMES[t] ?? t}): ${diffShares.toFixed(2)} @ ${px.toFixed(2)} → peso ${Math.round(w * 100)}%`);
+        await recordTrade(t, "BUY", diffShares, px, `Allocazione target — ${stratInfo.label}`);
+        await log(runId, "trade", `COMPRO ${t} (${nameFor(t)}): ${diffShares.toFixed(2)} @ ${px.toFixed(2)} → peso ${Math.round(w * 100)}%`);
       } else {
         cash += -diffShares * px;
         await upsertPosition(currentPositions, t, diffShares, px);
@@ -230,7 +315,7 @@ export async function getAutoState(priceOf?: (t: string) => number): Promise<Aut
     const value = r.shares * price;
     const cost = r.shares * r.avg_cost;
     return {
-      ticker: r.ticker, name: AUTO_NAMES[r.ticker] ?? r.ticker, shares: +r.shares.toFixed(4),
+      ticker: r.ticker, name: nameFor(r.ticker), shares: +r.shares.toFixed(4),
       avgCost: +r.avg_cost.toFixed(2), price: +price.toFixed(2), value: +value.toFixed(2),
       pnl: +(value - cost).toFixed(2), pnlPct: cost > 0 ? +(((value - cost) / cost) * 100).toFixed(2) : 0,
       weight: 0,

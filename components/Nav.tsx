@@ -12,6 +12,8 @@ const LINKS = [
   { href: "/momentum", key: "nav.momentum", icon: "⚡" },
   { href: "/portfolio-momentum", key: "nav.portfolioMomentum", icon: "💼" },
   { href: "/index", key: "nav.index", icon: "🎯" },
+  { href: "/rotation", key: "nav.rotation", icon: "🔄" },
+  { href: "/autopilot", key: "nav.autopilot", icon: "🤖" },
   { href: "/news", key: "nav.news", icon: "📰" },
 ];
 

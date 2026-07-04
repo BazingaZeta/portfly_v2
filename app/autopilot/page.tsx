@@ -15,7 +15,12 @@ interface State {
 }
 interface LogEntry { ts: string; runId: string; kind: string; message: string; }
 interface Trade { ticker: string; action: string; shares: number; price: number; executedAt: string; reason: string | null; }
-interface Snapshot { state: State; market?: { open: boolean; state: string; asOf: string | null }; log: LogEntry[]; trades: Trade[]; equity: { date: string; equity: number }[]; }
+interface StrategyInfo {
+  strategy: "dual_momentum" | "rotation";
+  label: string;
+  rotation: { bull: string; defensive: string; smaPeriod: number };
+}
+interface Snapshot { state: State; strategy?: StrategyInfo; market?: { open: boolean; state: string; asOf: string | null }; log: LogEntry[]; trades: Trade[]; equity: { date: string; equity: number }[]; }
 interface Backtest {
   cagr: number; totalReturn: number; maxDrawdown: number; benchCagr: number;
   benchMaxDrawdown: number; years: number; equity: { date: string; equity: number; bench: number }[];
@@ -34,6 +39,7 @@ export default function AutopilotPage() {
   const [bt, setBt] = useState<Backtest | null>(null);
   const [btRunning, setBtRunning] = useState(false);
   const [cycleMsg, setCycleMsg] = useState<string | null>(null);
+  const [strategy, setStrategy] = useState<"rotation" | "dual_momentum">("rotation");
 
   const load = useCallback(async () => {
     const res = await fetch("/api/autopilot", { cache: "no-store" });
@@ -56,7 +62,7 @@ export default function AutopilotPage() {
     try {
       const res = await fetch("/api/autopilot", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, force }),
+        body: JSON.stringify(action === "start" ? { action, force, strategy } : { action, force }),
       });
       const data = await res.json();
       if (data.reset) { load(); return; }
@@ -73,11 +79,29 @@ export default function AutopilotPage() {
     }
   }
 
-  async function runBacktest() {
+  async function runBacktest(which?: "rotation" | "dual_momentum") {
     setBtRunning(true);
     try {
-      const res = await fetch("/api/autopilot/backtest", { cache: "no-store" });
-      setBt(await res.json());
+      const strat = which ?? snap?.strategy?.strategy ?? strategy;
+      if (strat === "rotation") {
+        const res = await fetch("/api/rotation/backtest?years=5", { cache: "no-store" });
+        const r = await res.json();
+        if (res.ok) {
+          const bench = new Map<string, number>(
+            (r.spyEquity as { date: string; equity: number }[]).map((p) => [p.date, p.equity])
+          );
+          setBt({
+            cagr: r.cagr, totalReturn: r.totalReturn, maxDrawdown: r.maxDrawdown,
+            benchCagr: r.spyCagr, benchMaxDrawdown: r.spyMaxDrawdown, years: r.years,
+            equity: (r.equity as { date: string; equity: number }[]).map((p) => ({
+              date: p.date, equity: p.equity, bench: bench.get(p.date) ?? p.equity,
+            })),
+          });
+        }
+      } else {
+        const res = await fetch("/api/autopilot/backtest", { cache: "no-store" });
+        setBt(await res.json());
+      }
     } finally {
       setBtRunning(false);
     }
@@ -95,9 +119,23 @@ export default function AutopilotPage() {
         </div>
         <div className="flex flex-col gap-2 shrink-0">
           {!running ? (
-            <button onClick={() => act("start")} disabled={busy} className="btn-primary whitespace-nowrap">
-              {busy ? t("auto.running") : t("auto.start")}
-            </button>
+            <>
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] uppercase text-[var(--muted)]">{t("auto.strategy")}</span>
+                <select
+                  value={strategy}
+                  onChange={(e) => setStrategy(e.target.value as "rotation" | "dual_momentum")}
+                  className="input text-sm"
+                  disabled={busy}
+                >
+                  <option value="rotation">{t("auto.strategyRotation")}</option>
+                  <option value="dual_momentum">{t("auto.strategyDual")}</option>
+                </select>
+              </label>
+              <button onClick={() => act("start")} disabled={busy} className="btn-primary whitespace-nowrap">
+                {busy ? t("auto.running") : t("auto.start")}
+              </button>
+            </>
           ) : (
             <>
               <button onClick={() => act("run")} disabled={busy} className="btn-primary whitespace-nowrap">
@@ -119,7 +157,12 @@ export default function AutopilotPage() {
       </div>
       {running && (
         <div className="mb-3 rounded-xl border border-[var(--positive)]/40 bg-[var(--positive)]/8 p-3 text-xs text-[var(--positive)]">
-          {t("auto.schedulerOn", { min: 10 })}
+          {t("auto.schedulerDaily")}
+          {snap?.strategy && (
+            <span className="block mt-1 font-medium">
+              {t("auto.activeStrategy", { s: snap.strategy.label })}
+            </span>
+          )}
         </div>
       )}
       {running && (
@@ -244,7 +287,7 @@ export default function AutopilotPage() {
       <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-medium">{t("auto.btTitle")}</h2>
-          <button onClick={runBacktest} disabled={btRunning} className="btn-ghost text-xs border border-[var(--border)]">
+          <button onClick={() => runBacktest()} disabled={btRunning} className="btn-ghost text-xs border border-[var(--border)]">
             {btRunning ? t("auto.btRunning") : t("auto.btRun")}
           </button>
         </div>
