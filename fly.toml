@@ -1,28 +1,32 @@
-# https://fly.io/docs/reference/configuration/
-app = "finance-bot"
-primary_region = "fra"   # Frankfurt — change if needed
+# fly.toml app configuration file generated for portfly on 2026-06-27T13:56:29+01:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'portfly'
+primary_region = 'fra'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
 
 [env]
-  PORT = "3000"
-  NODE_ENV = "production"
-  # AUTH_SECRET is set via `fly secrets set AUTH_SECRET=...` — never hardcode here.
+  NODE_ENV = 'production'
+  PORT = '3000'
 
-[[vm]]
-  memory = "512mb"
-  cpu_kind = "shared"
-  cpus = 1
+[[mounts]]
+  source = 'finance_data'
+  destination = '/app/data'
+  initial_size = '1gb'
 
 [http_service]
   internal_port = 3000
   force_https = true
-  auto_stop_machines = "stop"     # stop when idle to save credit
+  auto_stop_machines = 'stop'
   auto_start_machines = true
-  min_machines_running = 0        # can be 1 if you want no cold starts
+  min_machines_running = 0
 
-[[mounts]]
-  source = "finance_data"
-  destination = "/app/data"
-  initial_size = "1gb"
+[[vm]]
+  memory = '512mb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 512

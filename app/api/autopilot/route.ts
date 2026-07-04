@@ -12,17 +12,23 @@ export const maxDuration = 120;
 
 async function snapshot() {
   const [prices, market] = await Promise.all([fetchQuotes(AUTO_UNIVERSE), fetchMarketStatus()]);
+  const [state, log, trades, equity] = await Promise.all([
+    getAutoState((t) => prices[t] ?? 0),
+    getAutoLog(80),
+    getAutoTrades(40),
+    getAutoEquityCurve(),
+  ]);
   return {
-    state: getAutoState((t) => prices[t] ?? 0),
+    state,
     market,
-    log: getAutoLog(80),
-    trades: getAutoTrades(40),
-    equity: getAutoEquityCurve(),
+    log,
+    trades,
+    equity,
   };
 }
 
 export async function GET() {
-  if (!getAutoStateRow()) {
+  if (!(await getAutoStateRow())) {
     return NextResponse.json({ state: { running: false }, log: [], trades: [], equity: [] });
   }
   return NextResponse.json(await snapshot());
@@ -33,14 +39,14 @@ export async function POST(req: NextRequest) {
   const action = body?.action;
   let rebalanced = false;
   if (action === "start") {
-    startAutopilot(Number(body.capital) > 0 ? Number(body.capital) : 10000);
+    await startAutopilot(Number(body.capital) > 0 ? Number(body.capital) : 10000);
     const r = await runTick(true); // immediately invest
     rebalanced = r.rebalanced;
   } else if (action === "run") {
     const r = await runTick(Boolean(body.force));
     rebalanced = r.rebalanced;
   } else if (action === "reset") {
-    resetAutopilot();
+    await resetAutopilot();
     return NextResponse.json({ ok: true, reset: true });
   } else {
     return NextResponse.json({ error: "action non valida" }, { status: 400 });

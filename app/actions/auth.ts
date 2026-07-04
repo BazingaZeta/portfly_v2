@@ -16,7 +16,7 @@ export async function login(_state: AuthState, formData: FormData): Promise<Auth
     return { errors: { form: ["Email e password sono obbligatori."] } };
   }
 
-  const user = getUserByEmail(email);
+  const user = await getUserByEmail(email);
   if (!user || !verifyPassword(password, user.passwordHash)) {
     return { errors: { form: ["Email o password non corretti."] } };
   }
@@ -40,16 +40,16 @@ export async function signup(_state: AuthState, formData: FormData): Promise<Aut
     return { errors: { password: ["La password deve avere almeno 8 caratteri."] } };
   }
 
-  if (getUserByEmail(email)) {
+  if (await getUserByEmail(email)) {
     return { errors: { email: ["Questa email è già registrata."] } };
   }
 
   // Only allow registrations while the user count is low (≤ 10) — invite-only model.
-  if (userCount() >= 10) {
+  if (await userCount() >= 10) {
     return { errors: { form: ["Registrazioni chiuse. Contatta l'amministratore."] } };
   }
 
-  const user = createUser(email, name, password);
+  const user = await createUser(email, name, password);
   await createSession({ userId: user.id, email: user.email, name: user.name });
   redirect("/");
 }

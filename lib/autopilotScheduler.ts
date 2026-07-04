@@ -13,7 +13,7 @@ let ticking = false;
 async function safeTick(): Promise<void> {
   if (ticking) return; // never overlap
   try {
-    if (!getAutoStateRow()) return; // bot not started → nothing to do
+    if (!(await getAutoStateRow())) return; // bot not started → nothing to do
     ticking = true;
     const r = await runTick(false);
     console.log(`[autopilot] tick automatico — ${r.rebalanced ? "RIBILANCIATO" : "nessun ribilancio"}`);

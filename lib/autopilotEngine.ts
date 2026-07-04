@@ -1,4 +1,16 @@
-import { db } from "./db";
+import {
+  getAutoEquity,
+  getAutoLog as getDbAutoLog,
+  getAutoPositions,
+  getAutoState as getDbAutoState,
+  getAutoTrades as getDbAutoTrades,
+  insertAutoLog,
+  insertAutoTrade,
+  resetAutoState as resetDbAutoState,
+  upsertAutoEquity,
+  upsertAutoPosition,
+  upsertAutoState,
+} from "./db";
 import { computeStrategy, fetchUniverseCandles, AUTO_UNIVERSE, AUTO_NAMES } from "./autopilot";
 import { fetchQuotes } from "./marketData";
 
@@ -32,41 +44,41 @@ type StateRow = {
   last_run: string | null; last_rebalance_month: string | null;
 };
 
-export function getAutoStateRow(): StateRow | null {
-  return (db().prepare(`SELECT * FROM auto_state WHERE id = 1`).get() as StateRow) ?? null;
+export async function getAutoStateRow(): Promise<StateRow | null> {
+  const state = await getDbAutoState();
+  if (!state) return null;
+  return {
+    cash: state.cash,
+    initial_capital: state.initial_capital,
+    started_at: state.started_at,
+    last_run: state.last_run,
+    last_rebalance_month: state.last_rebalance_month,
+  };
 }
 
-export function startAutopilot(initialCapital = 10000): void {
+export async function startAutopilot(initialCapital = 10000): Promise<void> {
   const now = new Date().toISOString();
-  db().prepare(
-    `INSERT INTO auto_state (id, cash, initial_capital, started_at, last_run, last_rebalance_month)
-     VALUES (1, @cap, @cap, @now, NULL, NULL)
-     ON CONFLICT(id) DO UPDATE SET cash=@cap, initial_capital=@cap, started_at=@now, last_run=NULL, last_rebalance_month=NULL`
-  ).run({ cap: initialCapital, now });
-  db().prepare(`DELETE FROM auto_positions`).run();
-  db().prepare(`DELETE FROM auto_trades`).run();
-  db().prepare(`DELETE FROM auto_log`).run();
-  db().prepare(`DELETE FROM auto_equity`).run();
-  log(now.slice(0, 19), "start", `Autopilot avviato con capitale virtuale ${initialCapital}$.`);
+  await resetDbAutoState();
+  await upsertAutoState({
+    cash: initialCapital,
+    initial_capital: initialCapital,
+    started_at: now,
+    last_run: null,
+    last_rebalance_month: null,
+  });
+  await log(now.slice(0, 19), "start", `Autopilot avviato con capitale virtuale ${initialCapital}$.`);
 }
 
-export function resetAutopilot(): void {
-  db().prepare(`DELETE FROM auto_state`).run();
-  db().prepare(`DELETE FROM auto_positions`).run();
-  db().prepare(`DELETE FROM auto_trades`).run();
-  db().prepare(`DELETE FROM auto_log`).run();
-  db().prepare(`DELETE FROM auto_equity`).run();
+export async function resetAutopilot(): Promise<void> {
+  await resetDbAutoState();
 }
 
-function log(runId: string, kind: string, message: string): void {
-  db().prepare(`INSERT INTO auto_log (ts, run_id, kind, message) VALUES (?, ?, ?, ?)`)
-    .run(new Date().toISOString(), runId, kind, message);
+async function log(runId: string, kind: string, message: string): Promise<void> {
+  await insertAutoLog(runId, kind, message);
 }
 
-function positionsMap(): Record<string, { shares: number; avgCost: number }> {
-  const rows = db().prepare(`SELECT ticker, shares, avg_cost FROM auto_positions`).all() as {
-    ticker: string; shares: number; avg_cost: number;
-  }[];
+async function positionsMap(): Promise<Record<string, { shares: number; avgCost: number }>> {
+  const rows = await getAutoPositions();
   const m: Record<string, { shares: number; avgCost: number }> = {};
   for (const r of rows) m[r.ticker] = { shares: r.shares, avgCost: r.avg_cost };
   return m;
@@ -78,25 +90,26 @@ function positionsMap(): Record<string, { shares: number; avgCost: number }> {
  * Everything is logged transparently. No real orders are ever placed.
  */
 export async function runTick(force = false): Promise<{ ran: boolean; rebalanced: boolean }> {
-  let state = getAutoStateRow();
+  let state = await getAutoStateRow();
   if (!state) {
-    startAutopilot();
-    state = getAutoStateRow()!;
+    await startAutopilot();
+    state = (await getAutoStateRow())!;
   }
   const runId = new Date().toISOString().slice(0, 19);
   const now = new Date().toISOString();
-  log(runId, "run", "▶ Avvio ciclo: scarico i dati dell'universo ETF…");
+  await log(runId, "run", "▶ Avvio ciclo: scarico i dati dell'universo ETF…");
 
   const candles = await fetchUniverseCandles(2);
   const prices = await fetchQuotes(AUTO_UNIVERSE);
   const priceOf = (t: string) => prices[t] ?? candles[t]?.[candles[t].length - 1]?.close ?? 0;
 
   const decision = computeStrategy(candles);
-  for (const s of decision.steps) log(runId, "analysis", s);
+  for (const s of decision.steps) await log(runId, "analysis", s);
 
   // Current month for monthly rebalance cadence.
   const month = now.slice(0, 7);
-  const positions = positionsMap();
+  const positions = await positionsMap();
+  const currentPositions = { ...positions };
 
   // Trend-break guard: if a held asset is no longer selected AND fell out of the
   // top/trend, we exit it immediately (risk management) even mid-month.
@@ -108,94 +121,110 @@ export async function runTick(force = false): Promise<{ ran: boolean; rebalanced
   let rebalanced = false;
   if (shouldRebalance) {
     rebalanced = true;
-    log(runId, "decision", isNewMonth || firstRun ? "Ribilancio mensile programmato." : "Ribilancio anticipato: un asset in portafoglio non è più tra i target (rottura trend).");
+    await log(runId, "decision", isNewMonth || firstRun ? "Ribilancio mensile programmato." : "Ribilancio anticipato: un asset in portafoglio non è più tra i target (rottura trend).");
 
     // Compute current equity (cash + positions marked to market).
     let invested = 0;
     for (const [t, p] of Object.entries(positions)) invested += p.shares * priceOf(t);
     const equity = state.cash + invested;
 
-    const tx = db().transaction(() => {
-      // 1) Sell everything not in the new target (full rebalance to target weights).
-      let cash = state!.cash;
-      for (const [t, p] of Object.entries(positions)) {
-        const px = priceOf(t);
-        if (!(t in decision.targets)) {
-          cash += p.shares * px;
-          db().prepare(`DELETE FROM auto_positions WHERE ticker = ?`).run(t);
-          recordTrade(t, "SELL", p.shares, px, "Uscita: non più tra i target / rottura trend");
-          log(runId, "trade", `VENDO ${t} (${AUTO_NAMES[t] ?? t}): ${p.shares.toFixed(2)} @ ${px.toFixed(2)}`);
-        }
+    let cash = state.cash;
+    for (const [t, p] of Object.entries(positions)) {
+      const px = priceOf(t);
+      if (!(t in decision.targets)) {
+        cash += p.shares * px;
+        await upsertAutoPosition(t, 0, p.avgCost);
+        delete currentPositions[t];
+        await recordTrade(t, "SELL", p.shares, px, "Uscita: non più tra i target / rottura trend");
+        await log(runId, "trade", `VENDO ${t} (${AUTO_NAMES[t] ?? t}): ${p.shares.toFixed(2)} @ ${px.toFixed(2)}`);
       }
-      // 2) Compute target $ per asset and adjust holdings.
-      for (const [t, w] of Object.entries(decision.targets)) {
-        const px = priceOf(t);
-        if (px <= 0) continue;
-        const targetVal = equity * w;
-        const cur = positionsMap()[t];
-        const curVal = cur ? cur.shares * px : 0;
-        const diffVal = targetVal - curVal;
-        if (Math.abs(diffVal) < equity * 0.01) continue; // ignore <1% drift
-        const diffShares = diffVal / px;
-        if (diffShares > 0) {
-          cash -= diffShares * px;
-          upsertPosition(t, diffShares, px);
-          recordTrade(t, "BUY", diffShares, px, "Allocazione target dual-momentum");
-          log(runId, "trade", `COMPRO ${t} (${AUTO_NAMES[t] ?? t}): ${diffShares.toFixed(2)} @ ${px.toFixed(2)} → peso ${Math.round(w * 100)}%`);
-        } else {
-          cash += -diffShares * px;
-          upsertPosition(t, diffShares, px);
-          recordTrade(t, "SELL", -diffShares, px, "Riduzione verso peso target");
-        }
+    }
+    for (const [t, w] of Object.entries(decision.targets)) {
+      const px = priceOf(t);
+      if (px <= 0) continue;
+      const targetVal = equity * w;
+      const cur = currentPositions[t];
+      const curVal = cur ? cur.shares * px : 0;
+      const diffVal = targetVal - curVal;
+      if (Math.abs(diffVal) < equity * 0.01) continue;
+      const diffShares = diffVal / px;
+      if (diffShares > 0) {
+        cash -= diffShares * px;
+        await upsertPosition(currentPositions, t, diffShares, px);
+        await recordTrade(t, "BUY", diffShares, px, "Allocazione target dual-momentum");
+        await log(runId, "trade", `COMPRO ${t} (${AUTO_NAMES[t] ?? t}): ${diffShares.toFixed(2)} @ ${px.toFixed(2)} → peso ${Math.round(w * 100)}%`);
+      } else {
+        cash += -diffShares * px;
+        await upsertPosition(currentPositions, t, diffShares, px);
+        await recordTrade(t, "SELL", -diffShares, px, "Riduzione verso peso target");
       }
-      db().prepare(`UPDATE auto_state SET cash = ?, last_run = ?, last_rebalance_month = ? WHERE id = 1`)
-        .run(+cash.toFixed(2), now, month);
+    }
+    cash = +cash.toFixed(2);
+    await upsertAutoState({
+      cash,
+      initial_capital: state.initial_capital,
+      started_at: state.started_at,
+      last_run: now,
+      last_rebalance_month: month,
     });
-    tx();
+    state = { ...state, cash, last_run: now, last_rebalance_month: month };
   } else {
-    log(runId, "decision", "Nessun ribilancio: allocazione invariata, aggiorno solo il valore.");
-    db().prepare(`UPDATE auto_state SET last_run = ? WHERE id = 1`).run(now);
+    await log(runId, "decision", "Nessun ribilancio: allocazione invariata, aggiorno solo il valore.");
+    await upsertAutoState({
+      cash: state.cash,
+      initial_capital: state.initial_capital,
+      started_at: state.started_at,
+      last_run: now,
+      last_rebalance_month: state.last_rebalance_month,
+    });
+    state = { ...state, last_run: now };
   }
 
   // Snapshot equity.
-  const view = getAutoState(priceOf);
-  db().prepare(`INSERT INTO auto_equity (ts, equity) VALUES (?, ?) ON CONFLICT(ts) DO UPDATE SET equity = excluded.equity`)
-    .run(now.slice(0, 10), +view.equity.toFixed(2));
-  log(runId, "run", `✔ Ciclo completato. Valore portafoglio: ${view.equity.toFixed(0)}$ (P&L ${view.totalPnl >= 0 ? "+" : ""}${view.totalPnl.toFixed(0)}$).`);
+  const view = await getAutoState(priceOf);
+  await upsertAutoEquity(now.slice(0, 10), +view.equity.toFixed(2));
+  await log(runId, "run", `✔ Ciclo completato. Valore portafoglio: ${view.equity.toFixed(0)}$ (P&L ${view.totalPnl >= 0 ? "+" : ""}${view.totalPnl.toFixed(0)}$).`);
 
   return { ran: true, rebalanced };
 }
 
-function recordTrade(ticker: string, action: string, shares: number, price: number, reason: string): void {
-  db().prepare(`INSERT INTO auto_trades (ticker, action, shares, price, executed_at, reason) VALUES (?,?,?,?,?,?)`)
-    .run(ticker, action, +shares.toFixed(4), +price.toFixed(2), new Date().toISOString(), reason);
+async function recordTrade(ticker: string, action: string, shares: number, price: number, reason: string): Promise<void> {
+  await insertAutoTrade(ticker, action, +shares.toFixed(4), +price.toFixed(2), reason);
 }
 
-function upsertPosition(ticker: string, addShares: number, price: number): void {
-  const cur = db().prepare(`SELECT shares, avg_cost FROM auto_positions WHERE ticker = ?`).get(ticker) as
-    | { shares: number; avg_cost: number } | undefined;
+async function upsertPosition(
+  positions: Record<string, { shares: number; avgCost: number }>,
+  ticker: string,
+  addShares: number,
+  price: number
+): Promise<void> {
+  const cur = positions[ticker];
   if (!cur) {
-    db().prepare(`INSERT INTO auto_positions (ticker, shares, avg_cost) VALUES (?,?,?)`).run(ticker, +addShares.toFixed(6), price);
+    const shares = +addShares.toFixed(6);
+    await upsertAutoPosition(ticker, shares, price);
+    positions[ticker] = { shares, avgCost: price };
     return;
   }
   const newShares = cur.shares + addShares;
   if (newShares <= 0.0000001) {
-    db().prepare(`DELETE FROM auto_positions WHERE ticker = ?`).run(ticker);
+    await upsertAutoPosition(ticker, 0, cur.avgCost);
+    delete positions[ticker];
     return;
   }
   // weighted avg cost only increases on buys
-  const avg = addShares > 0 ? (cur.shares * cur.avg_cost + addShares * price) / newShares : cur.avg_cost;
-  db().prepare(`UPDATE auto_positions SET shares = ?, avg_cost = ? WHERE ticker = ?`).run(+newShares.toFixed(6), +avg.toFixed(2), ticker);
+  const avg = addShares > 0 ? (cur.shares * cur.avgCost + addShares * price) / newShares : cur.avgCost;
+  const shares = +newShares.toFixed(6);
+  const avgCost = +avg.toFixed(2);
+  await upsertAutoPosition(ticker, shares, avgCost);
+  positions[ticker] = { shares, avgCost };
 }
 
-export function getAutoState(priceOf?: (t: string) => number): AutoStateView {
-  const state = getAutoStateRow();
+export async function getAutoState(priceOf?: (t: string) => number): Promise<AutoStateView> {
+  const state = await getAutoStateRow();
   if (!state) {
     return { running: false, cash: 0, initialCapital: 0, equity: 0, totalPnl: 0, totalPnlPct: 0, startedAt: null, lastRun: null, positions: [] };
   }
-  const rows = db().prepare(`SELECT ticker, shares, avg_cost FROM auto_positions`).all() as {
-    ticker: string; shares: number; avg_cost: number;
-  }[];
+  const rows = await getAutoPositions();
   const positions: AutoPosition[] = rows.map((r) => {
     const price = (priceOf ? priceOf(r.ticker) : 0) || r.avg_cost;
     const value = r.shares * price;
@@ -223,21 +252,17 @@ export function getAutoState(priceOf?: (t: string) => number): AutoStateView {
   };
 }
 
-export function getAutoLog(limit = 80): AutoLogEntry[] {
-  const rows = db().prepare(`SELECT ts, run_id, kind, message FROM auto_log ORDER BY id DESC LIMIT ?`).all(limit) as {
-    ts: string; run_id: string; kind: string; message: string;
-  }[];
+export async function getAutoLog(limit = 80): Promise<AutoLogEntry[]> {
+  const rows = await getDbAutoLog(limit);
   return rows.map((r) => ({ ts: r.ts, runId: r.run_id, kind: r.kind, message: r.message }));
 }
 
-export function getAutoTrades(limit = 50): AutoTrade[] {
-  const rows = db().prepare(`SELECT ticker, action, shares, price, executed_at, reason FROM auto_trades ORDER BY id DESC LIMIT ?`).all(limit) as {
-    ticker: string; action: string; shares: number; price: number; executed_at: string; reason: string | null;
-  }[];
+export async function getAutoTrades(limit = 50): Promise<AutoTrade[]> {
+  const rows = await getDbAutoTrades(limit);
   return rows.map((r) => ({ ticker: r.ticker, action: r.action, shares: r.shares, price: r.price, executedAt: r.executed_at, reason: r.reason }));
 }
 
-export function getAutoEquityCurve(): { date: string; equity: number }[] {
-  const rows = db().prepare(`SELECT ts, equity FROM auto_equity ORDER BY ts ASC`).all() as { ts: string; equity: number }[];
+export async function getAutoEquityCurve(): Promise<{ date: string; equity: number }[]> {
+  const rows = await getAutoEquity();
   return rows.map((r) => ({ date: r.ts, equity: r.equity }));
 }

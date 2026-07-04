@@ -1,28 +1,25 @@
-import { db } from "./db";
+import { createUser as createDbUser, db, getUserByEmail as getDbUserByEmail } from "./db";
 import bcrypt from "bcryptjs";
 
 export type User = { id: number; email: string; name: string };
 type UserRow = { id: number; email: string; name: string; password_hash: string };
 
-export function getUserByEmail(email: string): (User & { passwordHash: string }) | null {
-  const row = db()
-    .prepare(`SELECT id, email, name, password_hash FROM users WHERE email = ?`)
-    .get(email) as UserRow | undefined;
+export async function getUserByEmail(email: string): Promise<(User & { passwordHash: string }) | null> {
+  const row = await getDbUserByEmail(email);
   if (!row) return null;
   return { id: row.id, email: row.email, name: row.name, passwordHash: row.password_hash };
 }
 
-export function createUser(email: string, name: string, password: string): User {
+export async function createUser(email: string, name: string, password: string): Promise<User> {
   const hash = bcrypt.hashSync(password, 12);
-  const info = db()
-    .prepare(`INSERT INTO users (email, name, password_hash, created_at) VALUES (?, ?, ?, ?)`)
-    .run(email, name, hash, new Date().toISOString());
-  return { id: Number(info.lastInsertRowid), email, name };
+  const user = await createDbUser(email, name, hash);
+  return { id: user.id, email, name };
 }
 
-export function userCount(): number {
-  const row = db().prepare(`SELECT COUNT(*) as n FROM users`).get() as { n: number };
-  return row.n;
+export async function userCount(): Promise<number> {
+  const client = await db();
+  const result = await client.execute(`SELECT COUNT(*) as n FROM users`);
+  return Number(result.rows[0]?.n ?? 0);
 }
 
 export function verifyPassword(password: string, hash: string): boolean {

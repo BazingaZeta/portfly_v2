@@ -19,8 +19,8 @@ export async function GET() {
   if (!session) return NextResponse.json({ error: "Non autenticato" }, { status: 401 });
   const userId = session.userId;
 
-  const trades = getAllTrades(userId);
-  const openBuys = getOpenBuyTrades(userId);
+  const trades = await getAllTrades(userId);
+  const openBuys = await getOpenBuyTrades(userId);
   const tickers = [...new Set(openBuys.map((t) => t.ticker))];
   const prices = tickers.length ? await fetchQuotes(tickers) : {};
   const positions = computePositions(openBuys, prices);
@@ -70,8 +70,8 @@ export async function POST(req: NextRequest) {
     // Snapshot target/stop from the recommendation so the position keeps them
     // even after the recommendation is replaced by a later scan.
     const recId = body.recommendationId ? Number(body.recommendationId) : null;
-    const rec = recId != null ? getRecommendationById(recId) : null;
-    const trade = insertTrade({
+    const rec = recId != null ? await getRecommendationById(recId) : null;
+    const trade = await insertTrade({
       recommendationId: recId,
       ticker,
       action: "BUY",
@@ -89,7 +89,7 @@ export async function POST(req: NextRequest) {
   }
 
   // SELL: close open BUY positions for this ticker, record realized P&L.
-  const openBuys = getOpenBuyTrades(userId).filter((t) => t.ticker === ticker);
+  const openBuys = (await getOpenBuyTrades(userId)).filter((t) => t.ticker === ticker);
   const closedShares = openBuys.reduce((s, b) => s + b.shares, 0);
   const costBasis = openBuys.reduce((s, b) => s + b.shares * b.price, 0);
   // Realized = proceeds on the shares actually closed minus their cost basis.
@@ -99,9 +99,9 @@ export async function POST(req: NextRequest) {
       ? +(price * closedShares - costBasis).toFixed(2)
       : null;
 
-  for (const b of openBuys) markTradeClosed(b.id);
+  for (const b of openBuys) await markTradeClosed(b.id);
 
-  const trade = insertTrade({
+  const trade = await insertTrade({
     recommendationId: body.recommendationId ? Number(body.recommendationId) : null,
     ticker,
     action: "SELL",

@@ -13,7 +13,7 @@ export async function GET() {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "Non autenticato" }, { status: 401 });
 
-  const openBuys = getOpenBuyTrades(session.userId);
+  const openBuys = await getOpenBuyTrades(session.userId);
   const tickers = [...new Set(openBuys.map((t) => t.ticker))];
   if (tickers.length === 0) return NextResponse.json({ signals: [] });
 

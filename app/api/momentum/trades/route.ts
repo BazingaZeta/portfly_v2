@@ -17,8 +17,8 @@ export async function GET() {
   if (!session) return NextResponse.json({ error: "Non autenticato" }, { status: 401 });
   const userId = session.userId;
 
-  const trades = getMomentumTrades(userId);
-  const openBuys = getOpenMomentumBuys(userId);
+  const trades = await getMomentumTrades(userId);
+  const openBuys = await getOpenMomentumBuys(userId);
   const tickers = [...new Set(openBuys.map((t) => t.ticker))];
   const prices = tickers.length ? await fetchQuotes(tickers) : {};
 
@@ -90,7 +90,7 @@ export async function POST(req: NextRequest) {
   const executedAt = new Date().toISOString();
 
   if (action === "BUY") {
-    const trade = insertIndexTrade(
+    const trade = await insertIndexTrade(
       {
         indexKey,
         ticker,
@@ -111,13 +111,13 @@ export async function POST(req: NextRequest) {
   }
 
   // SELL: close all open buys for this ticker in the momentum section
-  const openBuys = getOpenMomentumBuys(userId).filter((t) => t.ticker === ticker);
+  const openBuys = (await getOpenMomentumBuys(userId)).filter((t) => t.ticker === ticker);
   const closedShares = openBuys.reduce((s, b) => s + b.shares, 0);
   const costBasis = openBuys.reduce((s, b) => s + b.shares * b.price, 0);
   const realizedPnl = closedShares > 0 ? +(price * closedShares - costBasis).toFixed(2) : null;
-  for (const b of openBuys) markIndexTradeClosed(b.id);
+  for (const b of openBuys) await markIndexTradeClosed(b.id);
 
-  const trade = insertIndexTrade(
+  const trade = await insertIndexTrade(
     {
       indexKey: openBuys[0]?.indexKey ?? indexKey,
       ticker,

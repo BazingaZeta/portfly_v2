@@ -9,7 +9,7 @@ export async function GET() {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "Non autenticato" }, { status: 401 });
 
-  const sells = getSellTrades(session.userId);
+  const sells = await getSellTrades(session.userId);
 
   const closed = sells.map((t) => {
     const realized = t.realizedPnl ?? 0;

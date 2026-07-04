@@ -17,8 +17,8 @@ export async function GET() {
   if (!session) return NextResponse.json({ error: "Non autenticato" }, { status: 401 });
   const userId = session.userId;
 
-  const trades = getIndexTrades(userId);
-  const openBuys = getOpenIndexBuys(userId);
+  const trades = await getIndexTrades(userId);
+  const openBuys = await getOpenIndexBuys(userId);
   const tickers = [...new Set(openBuys.map((t) => t.ticker))];
   const prices = tickers.length ? await fetchQuotes(tickers) : {};
 
@@ -84,7 +84,7 @@ export async function POST(req: NextRequest) {
   const executedAt = new Date().toISOString();
 
   if (action === "BUY") {
-    const trade = insertIndexTrade({
+    const trade = await insertIndexTrade({
       indexKey: String(body.indexKey ?? ""),
       ticker,
       name: String(body.name ?? ticker),
@@ -102,13 +102,13 @@ export async function POST(req: NextRequest) {
   }
 
   // SELL: close open buys for this ticker, record realized P&L.
-  const openBuys = getOpenIndexBuys(userId).filter((t) => t.ticker === ticker);
+  const openBuys = (await getOpenIndexBuys(userId)).filter((t) => t.ticker === ticker);
   const closedShares = openBuys.reduce((s, b) => s + b.shares, 0);
   const costBasis = openBuys.reduce((s, b) => s + b.shares * b.price, 0);
   const realizedPnl = closedShares > 0 ? +(price * closedShares - costBasis).toFixed(2) : null;
-  for (const b of openBuys) markIndexTradeClosed(b.id);
+  for (const b of openBuys) await markIndexTradeClosed(b.id);
 
-  const trade = insertIndexTrade({
+  const trade = await insertIndexTrade({
     indexKey: openBuys[0]?.indexKey ?? String(body.indexKey ?? ""),
     ticker,
     name: openBuys[0]?.name ?? ticker,
