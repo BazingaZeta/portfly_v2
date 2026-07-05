@@ -8,6 +8,8 @@ export interface Candle {
   low: number;
   close: number;
   volume: number;
+  /** Dividend/split-adjusted close (total return); falls back to close. */
+  adjClose?: number;
 }
 
 /** Snapshot of the technical indicators computed for a ticker. */
