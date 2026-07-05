@@ -232,8 +232,8 @@ export default function TrackPage() {
       {trades.length === 0 ? (
         <p className="text-[var(--muted)] text-sm">{t("track.noTrades")}</p>
       ) : (
-        <div className="rounded-xl border border-[var(--border)] overflow-hidden">
-          <table className="w-full text-sm">
+        <div className="rounded-xl border border-[var(--border)] overflow-hidden overflow-x-auto">
+          <table className="w-full text-sm min-w-[560px]">
             <thead className="bg-[var(--surface-2)] text-[var(--muted)] text-xs uppercase">
               <tr>
                 <Th>{t("track.colDate")}</Th>

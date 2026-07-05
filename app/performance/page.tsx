@@ -100,8 +100,8 @@ export default function PerformancePage() {
           <h2 className="text-sm font-medium text-[var(--muted)] uppercase tracking-wide mb-3">
             {t("perf.closedTrades")}
           </h2>
-          <div className="rounded-xl border border-[var(--border)] overflow-hidden">
-            <table className="w-full text-sm">
+          <div className="rounded-xl border border-[var(--border)] overflow-hidden overflow-x-auto">
+            <table className="w-full text-sm min-w-[560px]">
               <thead className="bg-[var(--surface-2)] text-[var(--muted)] text-xs uppercase">
                 <tr>
                   <th className="px-3 py-2 text-left font-medium">{t("track.colDate")}</th>
