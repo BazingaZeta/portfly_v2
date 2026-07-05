@@ -36,8 +36,8 @@ export function Nav() {
   }
 
   return (
-    <nav className="glass md:w-60 md:min-h-screen border-b md:border-b-0 md:border-r border-[var(--border)] px-4 py-4 md:py-6 flex md:flex-col gap-1 md:gap-2 items-center md:items-stretch md:sticky md:top-0 md:self-start">
-      <div className="flex items-center gap-2.5 md:mb-7 mr-auto md:mr-0">
+    <nav className="glass md:w-60 md:min-h-screen border-b md:border-b-0 md:border-r border-[var(--border)] px-3 md:px-4 py-2.5 md:py-6 flex md:flex-col gap-2 items-center md:items-stretch sticky top-0 z-40 md:self-start">
+      <div className="flex items-center gap-2.5 md:mb-7 shrink-0">
         <span
           className="grid place-items-center size-9 rounded-xl shadow-lg"
           style={{
@@ -50,16 +50,17 @@ export function Nav() {
             <path d="M21 9 L26 9 L26 14" stroke="#fff" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </span>
-        <span className="font-semibold tracking-tight text-[15px]">Finance Bot</span>
+        <span className="hidden md:inline font-semibold tracking-tight text-[15px]">Finance Bot</span>
       </div>
-      <div className="flex md:flex-col gap-1 md:gap-1.5">
+      {/* Mobile: riga di icone scorrevole; desktop: colonna con etichette */}
+      <div className="flex md:flex-col gap-1 md:gap-1.5 overflow-x-auto md:overflow-visible min-w-0 flex-1 md:flex-none [-webkit-overflow-scrolling:touch] [scrollbar-width:none]">
         {LINKS.map((l) => {
           const active = pathname === l.href;
           return (
             <Link
               key={l.href}
               href={l.href}
-              className={`flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm font-medium transition-all ${
+              className={`flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm font-medium transition-all shrink-0 whitespace-nowrap ${
                 active
                   ? "text-[#06121f] shadow-md"
                   : "text-[var(--muted)] hover:bg-[var(--surface-2)] hover:text-[var(--foreground)]"
@@ -74,12 +75,12 @@ export function Nav() {
               }
             >
               <span>{l.icon}</span>
-              <span className="hidden sm:inline">{t(l.key)}</span>
+              <span className="hidden md:inline">{t(l.key)}</span>
             </Link>
           );
         })}
       </div>
-      <div className="md:mt-auto md:pt-6 flex md:flex-col gap-2 items-center md:items-stretch">
+      <div className="md:mt-auto md:pt-6 flex md:flex-col gap-2 items-center md:items-stretch shrink-0">
         <LangSwitcher />
         {user && (
           <div className="hidden md:flex flex-col gap-1 pt-3 border-t border-[var(--border)]">
