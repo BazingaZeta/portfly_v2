@@ -20,7 +20,8 @@ interface StrategyInfo {
   label: string;
   rotation: { bull: string; defensive: string; smaPeriod: number };
 }
-interface Snapshot { state: State; strategy?: StrategyInfo; market?: { open: boolean; state: string; asOf: string | null }; log: LogEntry[]; trades: Trade[]; equity: { date: string; equity: number }[]; }
+interface KillInfo { paused: boolean; maxDdPct: number; peakEquity: number | null; telegram: boolean; }
+interface Snapshot { state: State; strategy?: StrategyInfo; market?: { open: boolean; state: string; asOf: string | null }; log: LogEntry[]; trades: Trade[]; equity: { date: string; equity: number }[]; kill?: KillInfo; }
 interface Backtest {
   cagr: number; totalReturn: number; maxDrawdown: number; benchCagr: number;
   benchMaxDrawdown: number; years: number; equity: { date: string; equity: number; bench: number }[];
@@ -155,12 +156,29 @@ export default function AutopilotPage() {
       <div className="mb-3 rounded-xl border border-[var(--warning)]/40 bg-[var(--warning)]/8 p-3 text-xs text-[var(--warning)]">
         {t("auto.disclaimer")}
       </div>
+      {running && snap?.kill?.paused && (
+        <div className="mb-3 rounded-xl border border-[var(--negative)]/50 bg-[var(--negative)]/10 p-3 text-sm text-[var(--negative)] flex flex-wrap items-center justify-between gap-3">
+          <span>
+            ⛔ <strong>Kill-switch attivo</strong>: il drawdown ha superato il {snap.kill.maxDdPct}% dal
+            picco — il bot è in pausa e non opera. Riprendendo, il picco riparte dall&apos;equity attuale.
+          </span>
+          <button onClick={() => act("resume")} disabled={busy} className="btn-primary text-xs px-3 py-1.5 shrink-0">
+            ▶ Riprendi
+          </button>
+        </div>
+      )}
       {running && (
         <div className="mb-3 rounded-xl border border-[var(--positive)]/40 bg-[var(--positive)]/8 p-3 text-xs text-[var(--positive)]">
           {t("auto.schedulerDaily")}
           {snap?.strategy && (
             <span className="block mt-1 font-medium">
               {t("auto.activeStrategy", { s: snap.strategy.label })}
+            </span>
+          )}
+          {snap?.kill && !snap.kill.paused && (
+            <span className="block mt-1 text-[var(--muted)]">
+              🛡️ Kill-switch: pausa automatica oltre il {snap.kill.maxDdPct}% di drawdown dal picco ·{" "}
+              {snap.kill.telegram ? "🔔 notifiche Telegram attive" : "🔕 Telegram non configurato (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)"}
             </span>
           )}
         </div>

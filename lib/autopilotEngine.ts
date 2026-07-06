@@ -13,6 +13,7 @@ import {
 } from "./db";
 import { getMeta, setMeta } from "./db";
 import { computeStrategy, fetchUniverseCandles, AUTO_UNIVERSE, AUTO_NAMES } from "./autopilot";
+import { sendTelegram } from "./notify";
 import {
   rotationDecision,
   normalizeRotationConfig,
@@ -119,6 +120,8 @@ export async function startAutopilot(
 
 export async function resetAutopilot(): Promise<void> {
   await resetDbAutoState();
+  await setMeta("autopilot_paused", "0");
+  await setMeta("autopilot_peak_equity", "0");
 }
 
 async function log(runId: string, kind: string, message: string): Promise<void> {
@@ -137,6 +140,38 @@ async function positionsMap(): Promise<Record<string, { shares: number; avgCost:
  * a rebalance moment or a trend broke) trade the paper account toward the target.
  * Everything is logged transparently. No real orders are ever placed.
  */
+// ─── Kill-switch ──────────────────────────────────────────────────────────────
+// Pausa automatica se l'equity scende oltre maxDd% dal picco: il bot smette di
+// operare (i tick non fanno nulla) finché non viene ripreso dalla UI. Guardrail
+// per non lasciare una strategia che sta sanguinando a girare da sola per giorni.
+
+export const DEFAULT_MAX_DD_PCT = 25;
+
+export async function getKillSwitch(): Promise<{ paused: boolean; maxDdPct: number; peakEquity: number | null }> {
+  const [paused, maxDd, peak] = await Promise.all([
+    getMeta("autopilot_paused"),
+    getMeta("autopilot_max_dd_pct"),
+    getMeta("autopilot_peak_equity"),
+  ]);
+  return {
+    paused: paused === "1",
+    maxDdPct: maxDd ? Number(maxDd) : DEFAULT_MAX_DD_PCT,
+    peakEquity: peak ? Number(peak) : null,
+  };
+}
+
+/** Riprende dopo una pausa kill-switch: il picco riparte dall'equity attuale. */
+export async function resumeAutopilot(): Promise<void> {
+  await setMeta("autopilot_paused", "0");
+  const view = await getAutoState();
+  await setMeta("autopilot_peak_equity", String(view.equity || 0));
+  await insertAutoLog(new Date().toISOString().slice(0, 19), "run", "▶ Ripresa manuale dopo pausa kill-switch: picco azzerato all'equity attuale.");
+}
+
+export async function setMaxDd(pct: number): Promise<void> {
+  await setMeta("autopilot_max_dd_pct", String(Math.min(90, Math.max(5, pct))));
+}
+
 export async function runTick(force = false): Promise<{ ran: boolean; rebalanced: boolean }> {
   let state = await getAutoStateRow();
   if (!state) {
@@ -145,6 +180,12 @@ export async function runTick(force = false): Promise<{ ran: boolean; rebalanced
   }
   const runId = new Date().toISOString().slice(0, 19);
   const now = new Date().toISOString();
+
+  const kill = await getKillSwitch();
+  if (kill.paused && !force) {
+    await log(runId, "decision", "⏸ Kill-switch attivo: nessuna operazione (riprendi dalla pagina Autopilot).");
+    return { ran: false, rebalanced: false };
+  }
 
   const stratInfo = await getAutopilotStrategy();
   const positions = await positionsMap();
@@ -194,6 +235,7 @@ export async function runTick(force = false): Promise<{ ran: boolean; rebalanced
       : force || firstRun || isNewMonth || heldOutOfTarget;
 
   let rebalanced = false;
+  const tradeLines: string[] = [];
   if (shouldRebalance) {
     rebalanced = true;
     await log(
@@ -222,6 +264,7 @@ export async function runTick(force = false): Promise<{ ran: boolean; rebalanced
         delete currentPositions[t];
         await recordTrade(t, "SELL", p.shares, px, "Uscita: non più tra i target / rottura trend");
         await log(runId, "trade", `VENDO ${t} (${nameFor(t)}): ${p.shares.toFixed(2)} @ ${px.toFixed(2)}`);
+        tradeLines.push(`🔴 VENDO ${p.shares.toFixed(2)} ${t} @ ${px.toFixed(2)}`);
       }
     }
     for (const [t, w] of Object.entries(decision.targets)) {
@@ -238,10 +281,12 @@ export async function runTick(force = false): Promise<{ ran: boolean; rebalanced
         await upsertPosition(currentPositions, t, diffShares, px);
         await recordTrade(t, "BUY", diffShares, px, `Allocazione target — ${stratInfo.label}`);
         await log(runId, "trade", `COMPRO ${t} (${nameFor(t)}): ${diffShares.toFixed(2)} @ ${px.toFixed(2)} → peso ${Math.round(w * 100)}%`);
+        tradeLines.push(`🟢 COMPRO ${diffShares.toFixed(2)} ${t} @ ${px.toFixed(2)} (peso ${Math.round(w * 100)}%)`);
       } else {
         cash += -diffShares * px;
         await upsertPosition(currentPositions, t, diffShares, px);
         await recordTrade(t, "SELL", -diffShares, px, "Riduzione verso peso target");
+        tradeLines.push(`🔴 RIDUCO ${(-diffShares).toFixed(2)} ${t} @ ${px.toFixed(2)}`);
       }
     }
     cash = +cash.toFixed(2);
@@ -269,6 +314,25 @@ export async function runTick(force = false): Promise<{ ran: boolean; rebalanced
   const view = await getAutoState(priceOf);
   await upsertAutoEquity(now.slice(0, 10), +view.equity.toFixed(2));
   await log(runId, "run", `✔ Ciclo completato. Valore portafoglio: ${view.equity.toFixed(0)}$ (P&L ${view.totalPnl >= 0 ? "+" : ""}${view.totalPnl.toFixed(0)}$).`);
+
+  // Notifica gli ordini eseguiti (no-op se Telegram non configurato).
+  if (tradeLines.length > 0) {
+    await sendTelegram(
+      `🤖 <b>Autopilot — ${stratInfo.label}</b>\n${tradeLines.join("\n")}\n` +
+      `Equity: $${view.equity.toFixed(0)} (P&L ${view.totalPnl >= 0 ? "+" : ""}${view.totalPnl.toFixed(0)}$)`
+    );
+  }
+
+  // Kill-switch: pausa automatica se il drawdown dal picco supera la soglia.
+  const peak = Math.max(kill.peakEquity ?? view.equity, view.equity);
+  await setMeta("autopilot_peak_equity", String(+peak.toFixed(2)));
+  const ddPct = peak > 0 ? ((peak - view.equity) / peak) * 100 : 0;
+  if (ddPct >= kill.maxDdPct && !kill.paused) {
+    await setMeta("autopilot_paused", "1");
+    const msg = `⛔ Kill-switch: drawdown ${ddPct.toFixed(1)}% ≥ ${kill.maxDdPct}% dal picco ($${peak.toFixed(0)} → $${view.equity.toFixed(0)}). Autopilot in pausa: nessuna nuova operazione finché non riprendi dalla pagina.`;
+    await log(runId, "decision", msg);
+    await sendTelegram(`⛔ <b>Autopilot in pausa (kill-switch)</b>\n${msg}`);
+  }
 
   return { ran: true, rebalanced };
 }
