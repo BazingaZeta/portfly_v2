@@ -49,17 +49,17 @@ export default function TrackPage() {
   }, []);
 
   useEffect(() => {
-    load(true);
+    const t = setTimeout(() => load(true), 0); // deferito: no setState sincrono nell'effect
     // Auto-refresh prices/P&L every 30s while the page is open.
     const id = setInterval(() => load(false), 30_000);
-    return () => clearInterval(id);
+    return () => { clearTimeout(t); clearInterval(id); };
   }, [load]);
 
   useEffect(() => {
-    loadExits();
+    const t = setTimeout(loadExits, 0);
     // Exit re-evaluation is heavier (candles + news) — refresh every 2 minutes.
     const id = setInterval(loadExits, 120_000);
-    return () => clearInterval(id);
+    return () => { clearTimeout(t); clearInterval(id); };
   }, [loadExits]);
 
   // Fetch price sparklines once per distinct set of open tickers.
@@ -73,7 +73,10 @@ export default function TrackPage() {
   }, [tickerKey]);
 
   useEffect(() => {
-    if (typeof Notification !== "undefined") setNotifPerm(Notification.permission);
+    const t = setTimeout(() => {
+      if (typeof Notification !== "undefined") setNotifPerm(Notification.permission);
+    }, 0);
+    return () => clearTimeout(t);
   }, []);
 
   const alerts = computeAlerts(positions);

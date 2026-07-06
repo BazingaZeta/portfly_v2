@@ -19,8 +19,12 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>("it");
 
   useEffect(() => {
-    const saved = localStorage.getItem("locale");
-    if (saved === "it" || saved === "en") setLocaleState(saved);
+    // Deferito di un tick: setState sincrono nel corpo dell'effect causa render a cascata.
+    const t = setTimeout(() => {
+      const saved = localStorage.getItem("locale");
+      if (saved === "it" || saved === "en") setLocaleState(saved);
+    }, 0);
+    return () => clearTimeout(t);
   }, []);
 
   const setLocale = useCallback((l: Locale) => {

@@ -28,7 +28,12 @@ import { runRotationBacktest } from "<repo>/lib/leverageRotation"; // Rotazione 
 
 Esecuzione: `npx tsx script.mts` (ignora il warning "Unsupported environment" di yahoo-finance2). Ogni run rifetcha da Yahoo (~3-20 s); lancia le griglie in background. Per accesso DB (Turso): `set -a && source .env.local && set +a` prima di tsx.
 
-Baseline note (2026-07, per accorgersi di regressioni): Momentum RS v3 default 2021-26 → tot +38,4%, PF 1,31, WF5 = [1.01/2.03/1.5/2.52/1.12]; Rotazione SSO/BIL 2022-26 → +100% vs SPY +79%, 21 switch; Sentiment thr70+cap3% 4,5y → PF 1,32, maxDD 19,5%.
+Baseline note (2026-07, per accorgersi di regressioni):
+- Momentum RS v3 default (SP500 top-80) 2021-26 → PF ~1,3, WF5 worst fold ≥1,0. `SP500_FULL` (503 titoli) NON è il default: full-period migliore (+200%) ma worst fold PF 0,4 → bocciato dal gate di robustezza.
+- Rotazione `deep:true` 33y default (SSO/BIL, SMA200, isteresi 2%) → CAGR 14,6 vs SPY 10,9, DD 39,3%, 58 switch, batte SPY 6/6 WF. Ladder bocciato (CAGR 8,2). TQQQ: CAGR ~20 ma DD 87%.
+- Sentiment thr70+cap3% 4,5y → PF 1,32, maxDD 19,5%.
+- I fetch sono cachati su file (.cache/candles, TTL 18h): warm run ~10ms/ticker; `CANDLE_CACHE=off` per disattivare. Yahoo serve lo storico completo (SPY dal 1993), usare `adjClose` per i rendimenti total-return.
+- `npm test` = 18 test deterministici sulla matematica dei motori: vanno tenuti verdi e estesi quando si tocca un motore.
 
 ## Mappa dei file
 
