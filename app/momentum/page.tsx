@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { money } from "@/lib/format";
 import { useRisk } from "@/components/RiskProvider";
 import { positionSize } from "@/lib/risk";
 import { INDICES } from "@/lib/indices";
+import { MomentumSellModal } from "@/components/MomentumSellModal";
 import type { RegressionChannel } from "@/lib/regression";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -31,6 +32,22 @@ interface MomentumLeader {
   target: number;
   spark: number[];
   metaSpark: number[];
+}
+
+/** Posizione aperta nel portafoglio Momentum (da GET /api/momentum/trades). */
+interface HeldPosition {
+  indexKey: string;
+  ticker: string;
+  shares: number;
+  avgCost: number;
+  currentPrice: number;
+  marketValue: number;
+  unrealizedPnl: number;
+  unrealizedPnlPct: number;
+  stop: number | null;
+  target: number | null;
+  stopHit: boolean;
+  targetHit: boolean;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -221,16 +238,44 @@ function BuyModal({
 function LeaderCard({
   leader,
   indexKey,
+  held,
   onTrade,
 }: {
   leader: MomentumLeader;
   indexKey: string;
+  held?: HeldPosition;
   onTrade: () => void;
 }) {
   const [buying, setBuying] = useState(false);
+  const [selling, setSelling] = useState(false);
   const upside = leader.target > 0 ? ((leader.target - leader.entry) / leader.entry) * 100 : 0;
   const downside = leader.stop > 0 ? ((leader.entry - leader.stop) / leader.entry) * 100 : 0;
   const rr = downside > 0 ? upside / downside : 0;
+
+  // Segnale per chi POSSIEDE il titolo: la regola di uscita della strategia è
+  // la rottura del canale del metatitolo (trend non più ascendente), più lo
+  // stop registrato sulla posizione. Il BUY/WAIT/AVOID vale solo per chi entra.
+  const trendBroken = leader.metaChannel.trend !== "asc";
+  const heldSignal: "HOLD" | "SELL" | null = held
+    ? held.stopHit || trendBroken ? "SELL" : "HOLD"
+    : null;
+  const sellReason = held
+    ? held.stopHit
+      ? `⛔ Stop toccato (${held.stop != null ? money(held.stop) : "—"}).`
+      : trendBroken
+      ? "📉 Canale del metatitolo non più ascendente — rottura trend, regola di uscita della strategia."
+      : null
+    : null;
+
+  const borderCls = held
+    ? heldSignal === "SELL"
+      ? "border-[var(--negative)]/50"
+      : "border-[var(--accent)]/50"
+    : leader.signal === "BUY"
+    ? "border-[var(--positive)]/40"
+    : leader.signal === "WAIT"
+    ? "border-[var(--warning)]/30"
+    : "border-[var(--border)]";
 
   return (
     <>
@@ -242,21 +287,37 @@ function LeaderCard({
           onDone={onTrade}
         />
       )}
-      <div
-        className={`card-hover rounded-xl border bg-[var(--surface)] p-4 flex flex-col gap-3 ${
-          leader.signal === "BUY"
-            ? "border-[var(--positive)]/40"
-            : leader.signal === "WAIT"
-            ? "border-[var(--warning)]/30"
-            : "border-[var(--border)]"
-        }`}
-      >
+      {selling && held && (
+        <MomentumSellModal
+          position={held}
+          onClose={() => setSelling(false)}
+          onDone={onTrade}
+        />
+      )}
+      <div className={`card-hover rounded-xl border bg-[var(--surface)] p-4 flex flex-col gap-3 ${borderCls}`}>
         {/* Header */}
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="font-bold text-base">{leader.ticker}</span>
-              <SignalBadge signal={leader.signal} />
+              {held ? (
+                <>
+                  <span className="px-2 py-0.5 rounded-md text-[10px] font-bold border bg-[var(--accent)]/15 text-[var(--accent)] border-[var(--accent)]/30">
+                    💼 IN PORTAFOGLIO
+                  </span>
+                  <span
+                    className={`px-2 py-0.5 rounded-md text-xs font-bold border ${
+                      heldSignal === "SELL"
+                        ? "bg-[var(--negative)]/15 text-[var(--negative)] border-[var(--negative)]/30"
+                        : "bg-[var(--positive)]/15 text-[var(--positive)] border-[var(--positive)]/30"
+                    }`}
+                  >
+                    {heldSignal === "SELL" ? "VENDI" : "MANTIENI"}
+                  </span>
+                </>
+              ) : (
+                <SignalBadge signal={leader.signal} />
+              )}
             </div>
             <div className="text-xs text-[var(--muted)] truncate">{leader.name}</div>
           </div>
@@ -267,6 +328,41 @@ function LeaderCard({
             </div>
           </div>
         </div>
+
+        {/* Holdings — quanto ne teniamo e come sta andando */}
+        {held && (
+          <div className="rounded-lg border border-[var(--accent)]/20 bg-[var(--accent)]/5 p-2.5 text-xs space-y-1">
+            <div className="flex justify-between">
+              <span className="text-[var(--muted)]">
+                {held.shares} azioni @ {money(held.avgCost)}
+              </span>
+              <span className="font-mono">{money(held.marketValue)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-[var(--muted)]">P&L</span>
+              <span className={`font-mono font-semibold ${held.unrealizedPnl >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>
+                {held.unrealizedPnl >= 0 ? "+" : ""}{money(held.unrealizedPnl)} ({held.unrealizedPnlPct >= 0 ? "+" : ""}{held.unrealizedPnlPct}%)
+              </span>
+            </div>
+            {(held.stop != null || held.target != null) && (
+              <div className="flex justify-between text-[var(--muted)]">
+                <span>Stop → Target</span>
+                <span className="font-mono">
+                  <span className="text-[var(--negative)]">{held.stop != null ? money(held.stop) : "—"}</span>
+                  {" → "}
+                  <span className="text-[var(--positive)]">{held.target != null ? money(held.target) : "—"}</span>
+                </span>
+              </div>
+            )}
+            {sellReason && <p className="text-[var(--negative)] font-medium">{sellReason}</p>}
+            {heldSignal === "HOLD" && held.targetHit && (
+              <p className="text-[var(--warning)] font-medium">🎯 Target raggiunto — valuta la presa di profitto.</p>
+            )}
+            {heldSignal === "HOLD" && !held.targetHit && (
+              <p className="text-[var(--positive)]">📈 Canale del metatitolo ancora ascendente: la tesi regge.</p>
+            )}
+          </div>
+        )}
 
         {/* RS scores */}
         <div className="grid grid-cols-4 gap-2 rounded-lg bg-[var(--surface-2)] p-2">
@@ -333,15 +429,28 @@ function LeaderCard({
           </div>
         </div>
 
-        {/* R/R and buy button */}
+        {/* R/R + azione: Vendi per i posseduti, Compra per i BUY nuovi */}
         <div className="flex items-center justify-between gap-2 border-t border-[var(--border)] pt-3">
           <span className="text-xs text-[var(--muted)]">
             R/R: <span className="font-mono text-[var(--foreground)]">{rr.toFixed(2)}</span>
           </span>
-          {leader.signal === "BUY" && (
-            <button onClick={() => setBuying(true)} className="btn-primary text-xs px-3 py-1.5">
-              Compra →
+          {held ? (
+            <button
+              onClick={() => setSelling(true)}
+              className={
+                heldSignal === "SELL"
+                  ? "btn-primary text-xs px-3 py-1.5 !bg-none !bg-[var(--negative)] !text-white"
+                  : "btn-ghost text-xs px-3 py-1.5 border border-[var(--border)]"
+              }
+            >
+              Vendi →
             </button>
+          ) : (
+            leader.signal === "BUY" && (
+              <button onClick={() => setBuying(true)} className="btn-primary text-xs px-3 py-1.5">
+                Compra →
+              </button>
+            )
           )}
         </div>
       </div>
@@ -357,7 +466,30 @@ export default function MomentumPage() {
   const [progress, setProgress] = useState<{ current: number; total: number; message: string } | null>(null);
   const [leaders, setLeaders] = useState<MomentumLeader[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<"all" | "BUY" | "WAIT" | "AVOID">("all");
+  const [filter, setFilter] = useState<"all" | "BUY" | "WAIT" | "AVOID" | "HELD">("all");
+  const [heldBy, setHeldBy] = useState<Record<string, HeldPosition>>({});
+
+  // Posizioni Momentum aperte: servono per trasformare le card dei titoli già
+  // posseduti da COMPRA a MANTIENI/VENDI. Ricaricate dopo ogni trade.
+  const loadPositions = useCallback(async () => {
+    try {
+      const res = await fetch("/api/momentum/trades", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      const map: Record<string, HeldPosition> = {};
+      for (const p of (data.positions ?? []) as HeldPosition[]) map[p.ticker] = p;
+      setHeldBy(map);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    // Deferito di un tick: setState sincrono nel corpo dell'effect causa render a cascata.
+    const t = setTimeout(loadPositions, 0);
+    const id = setInterval(loadPositions, 30_000); // P&L live sulle card possedute
+    return () => { clearTimeout(t); clearInterval(id); };
+  }, [loadPositions]);
 
   function analyze() {
     setAnalyzing(true);
@@ -386,11 +518,14 @@ export default function MomentumPage() {
   const filtered = leaders
     ? filter === "all"
       ? leaders
+      : filter === "HELD"
+      ? leaders.filter((l) => heldBy[l.ticker])
       : leaders.filter((l) => l.signal === filter)
     : null;
 
-  const buyCount = leaders?.filter((l) => l.signal === "BUY").length ?? 0;
+  const buyCount = leaders?.filter((l) => l.signal === "BUY" && !heldBy[l.ticker]).length ?? 0;
   const waitCount = leaders?.filter((l) => l.signal === "WAIT").length ?? 0;
+  const heldCount = leaders?.filter((l) => heldBy[l.ticker]).length ?? 0;
 
   return (
     <div className="max-w-5xl mx-auto">
@@ -424,7 +559,7 @@ export default function MomentumPage() {
         </button>
         {leaders && (
           <div className="flex gap-1 ml-auto">
-            {(["all", "BUY", "WAIT", "AVOID"] as const).map((f) => (
+            {(["all", "HELD", "BUY", "WAIT", "AVOID"] as const).map((f) => (
               <button
                 key={f}
                 onClick={() => setFilter(f)}
@@ -434,7 +569,7 @@ export default function MomentumPage() {
                     : "border-[var(--border)] text-[var(--muted)] hover:bg-[var(--surface-2)]"
                 }`}
               >
-                {f === "all" ? `Tutti (${leaders.length})` : f === "BUY" ? `COMPRA (${buyCount})` : f === "WAIT" ? `ATTENDI (${waitCount})` : "EVITA"}
+                {f === "all" ? `Tutti (${leaders.length})` : f === "HELD" ? `💼 Posseduti (${heldCount})` : f === "BUY" ? `COMPRA (${buyCount})` : f === "WAIT" ? `ATTENDI (${waitCount})` : "EVITA"}
               </button>
             ))}
           </div>
@@ -489,7 +624,11 @@ export default function MomentumPage() {
             <>
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-sm font-medium text-[var(--muted)] uppercase tracking-wide">
-                  {filter === "all" ? "Classifica per forza relativa" : `Filtro: ${filter}`}
+                  {filter === "all"
+                    ? "Classifica per forza relativa"
+                    : filter === "HELD"
+                    ? "Le tue posizioni nella scan"
+                    : `Filtro: ${filter === "BUY" ? "COMPRA" : filter === "WAIT" ? "ATTENDI" : "EVITA"}`}
                 </h2>
                 <span className="text-xs text-[var(--muted)]">
                   {filtered.length} titoli · benchmark: {INDICES.find((i) => i.key === indexKey)?.proxy}
@@ -497,7 +636,7 @@ export default function MomentumPage() {
               </div>
               <div className="stagger grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {filtered.map((l) => (
-                  <LeaderCard key={l.ticker} leader={l} indexKey={indexKey} onTrade={() => {}} />
+                  <LeaderCard key={l.ticker} leader={l} indexKey={indexKey} held={heldBy[l.ticker]} onTrade={loadPositions} />
                 ))}
               </div>
             </>
