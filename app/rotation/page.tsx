@@ -269,7 +269,7 @@ export default function RotationPage() {
 
       {/* Current signal */}
       {status && (
-        <div className={`rounded-xl border p-5 mb-6 ${isBull ? "border-[var(--positive)]/40 bg-[var(--positive)]/5" : "border-[var(--warning)]/40 bg-[var(--warning)]/5"}`}>
+        <div className={`animate-in rounded-xl border p-5 mb-6 ${isBull ? "border-[var(--positive)]/40 bg-[var(--positive)]/5" : "border-[var(--warning)]/40 bg-[var(--warning)]/5"}`}>
           <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
             <div>
               <p className="text-[10px] uppercase text-[var(--muted)] mb-1">Segnale al {status.asOf}</p>
@@ -362,7 +362,7 @@ export default function RotationPage() {
               {bt.dataNote && <> · <span className="text-[var(--warning)]">{bt.dataNote}</span></>}
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+            <div className="stagger grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
               {[
                 { label: "Strategia — totale", value: bt.totalReturn, suffix: "%", colored: true },
                 { label: "SPY B&H — totale", value: bt.spyTotalReturn, suffix: "%", colored: true },
@@ -378,7 +378,7 @@ export default function RotationPage() {
               ))}
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+            <div className="stagger grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
               {[
                 { label: "Max DD strategia", value: `-${bt.maxDrawdown}%` },
                 { label: "Max DD SPY", value: `-${bt.spyMaxDrawdown}%` },

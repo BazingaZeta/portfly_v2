@@ -46,6 +46,7 @@ interface IndexPosition {
   name: string;
   shares: number;
   avgCost: number;
+  priceStale?: boolean;
   currentPrice: number;
   marketValue: number;
   unrealizedPnl: number;
@@ -522,7 +523,7 @@ function PositionsPanel({
                 </td>
                 <td className="px-3 py-2 text-right">{p.shares}</td>
                 <td className="px-3 py-2 text-right">{money(p.avgCost)}</td>
-                <td className="px-3 py-2 text-right">{money(p.currentPrice)}</td>
+                <td className="px-3 py-2 text-right">{p.priceStale && <span title="Quote live non disponibile: mostrato il costo medio" className="text-[var(--warning)] mr-1">⚠</span>}{money(p.currentPrice)}</td>
                 <td className="px-3 py-2 text-right font-mono" style={{ color: "var(--negative)" }}>{p.stop != null ? money(p.stop) : "—"}</td>
                 <td className="px-3 py-2 text-right" style={{ color: p.unrealizedPnl >= 0 ? "var(--positive)" : "var(--negative)" }}>
                   {money(p.unrealizedPnl)} ({pct(p.unrealizedPnlPct)})

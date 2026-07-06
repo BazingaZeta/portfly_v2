@@ -205,7 +205,7 @@ export default function AutopilotPage() {
       ) : st ? (
         <>
           {/* KPIs */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+          <div className="stagger grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
             <Kpi label={t("auto.equity")} value={money(st.equity)} accent="var(--accent)" />
             <Kpi label={t("auto.pnl")} value={`${money(st.totalPnl)} (${pct(st.totalPnlPct)})`} tone={st.totalPnl >= 0 ? "pos" : "neg"} />
             <Kpi label={t("auto.cash")} value={money(st.cash)} accent="var(--accent-2)" />

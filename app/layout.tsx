@@ -34,6 +34,10 @@ export default async function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col md:flex-row">
+        {/* Sfondo atmosferico: blob lenti dietro tutto, mai interattivo */}
+        <div className="backdrop" aria-hidden="true">
+          <span /><span /><span />
+        </div>
         <I18nProvider>
           <RiskProvider>
             {session && <Nav />}

@@ -18,6 +18,9 @@ function buildPositions(
     if (shares <= 0) continue;
     const costBasis = trades.reduce((s, t) => s + t.shares * t.price, 0);
     const avgCost = costBasis / shares;
+    // Quote mancante (delisting, simbolo cambiato, hiccup Yahoo): il fallback
+    // al costo medio mostrerebbe P&L zero in silenzio — va segnalato alla UI.
+    const priceStale = prices[ticker] == null;
     const currentPrice = prices[ticker] ?? avgCost;
     const marketValue = shares * currentPrice;
     const unrealizedPnl = marketValue - costBasis;
@@ -28,6 +31,7 @@ function buildPositions(
       name: source !== "main" ? first.name : undefined,
       shares,
       avgCost: +avgCost.toFixed(2),
+      priceStale,
       currentPrice: +currentPrice.toFixed(2),
       marketValue: +marketValue.toFixed(2),
       costBasis: +costBasis.toFixed(2),
