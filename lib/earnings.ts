@@ -1,4 +1,5 @@
 import YahooFinance from "yahoo-finance2";
+import { finnhubEnabled, fhNextEarnings } from "./finnhub";
 
 const yf = new YahooFinance();
 try {
@@ -16,6 +17,15 @@ export interface EarningsInfo {
 
 /** Fetch the next earnings date for a ticker. Returns nulls on failure. */
 export async function fetchEarnings(ticker: string): Promise<EarningsInfo> {
+  // Calendario earnings Finnhub quando configurato (più affidabile del
+  // quoteSummary Yahoo); fallback Yahoo se assente o senza risultati.
+  if (finnhubEnabled()) {
+    const date = await fhNextEarnings(ticker);
+    if (date) {
+      const daysUntil = Math.round((new Date(date).getTime() - Date.now()) / 86_400_000);
+      return { date, daysUntil };
+    }
+  }
   try {
     const res = await yf.quoteSummary(ticker, { modules: ["calendarEvents"] });
     const dates = res?.calendarEvents?.earnings?.earningsDate;

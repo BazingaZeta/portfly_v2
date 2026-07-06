@@ -1,4 +1,5 @@
 import Parser from "rss-parser";
+import { finnhubEnabled, fhCompanyNews } from "./finnhub";
 import type { NewsItem } from "./types";
 
 const parser = new Parser({
@@ -117,8 +118,41 @@ function toNewsItem(
   };
 }
 
-/** Per-ticker headlines from Yahoo Finance's free RSS endpoint. */
+/** Per-ticker news: Finnhub (multi-fonte, con summary) quando configurato, altrimenti RSS Yahoo. */
 export async function fetchTickerNews(
+  ticker: string,
+  limit = 6
+): Promise<NewsItem[]> {
+  // Finnhub: più fonti, testo più ricco (headline+summary → il lessico lavora
+  // su più segnale), storico fino a ~1 anno. Fallback silenzioso su Yahoo.
+  if (finnhubEnabled()) {
+    const rows = await fhCompanyNews(ticker, 7);
+    if (rows.length > 0) {
+      const seen = new Set<string>();
+      const items: NewsItem[] = [];
+      // Più recenti prima, dedup per titolo
+      for (const r of rows.sort((a, b) => b.datetime - a.datetime)) {
+        const key = r.headline.toLowerCase().trim();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        items.push({
+          title: r.headline,
+          link: r.url ?? "",
+          source: r.source || "Finnhub",
+          publishedAt: new Date(r.datetime * 1000).toISOString(),
+          sentiment: scoreSentiment(`${r.headline}. ${r.summary ?? ""}`),
+          tickers: [ticker],
+        });
+        if (items.length >= limit) break;
+      }
+      return items;
+    }
+  }
+  return fetchTickerNewsYahoo(ticker, limit);
+}
+
+/** Fallback: headlines dal feed RSS gratuito di Yahoo Finance. */
+async function fetchTickerNewsYahoo(
   ticker: string,
   limit = 6
 ): Promise<NewsItem[]> {

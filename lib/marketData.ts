@@ -1,6 +1,7 @@
 import YahooFinance from "yahoo-finance2";
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
+import { finnhubEnabled, fhQuotes } from "./finnhub";
 import type { Candle } from "./types";
 
 // v3 of yahoo-finance2 requires an instance.
@@ -134,6 +135,18 @@ export async function fetchQuotes(
 ): Promise<Record<string, number>> {
   const out: Record<string, number> = {};
   if (tickers.length === 0) return out;
+
+  // Set piccoli (portafogli, card): quote real-time Finnhub quando configurato
+  // (Yahoo può essere ritardato); i simboli non risolti proseguono su Yahoo.
+  // I set grandi (scan bulk) restano su Yahoo per il rate limit (60/min).
+  if (finnhubEnabled() && tickers.length <= 30) {
+    const fh = await fhQuotes(tickers);
+    Object.assign(out, fh);
+    const missing = tickers.filter((t) => out[t] == null);
+    if (missing.length === 0) return out;
+    tickers = missing;
+  }
+
   try {
     const results = await yahooFinance.quote(tickers);
     const arr = Array.isArray(results) ? results : [results];
