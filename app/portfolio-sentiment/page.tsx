@@ -692,10 +692,13 @@ export default function PortfolioSentimentPage() {
   }, []);
 
   useEffect(() => {
-    loadPortfolio();
-    loadPerformance();
+    // Deferito di un tick: setState sincrono nel corpo dell'effect causa render a cascata.
+    const t = setTimeout(() => {
+      loadPortfolio();
+      loadPerformance();
+    }, 0);
     const id = setInterval(loadPortfolio, 30_000);
-    return () => clearInterval(id);
+    return () => { clearTimeout(t); clearInterval(id); };
   }, [loadPortfolio, loadPerformance]);
 
   return (

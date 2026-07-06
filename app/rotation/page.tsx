@@ -26,6 +26,8 @@ interface WfPeriod {
 
 interface BtResult {
   config: { bull: string; defensive: string; smaPeriod: number };
+  hysteresisPct: number;
+  dataNote?: string;
   startDate: string; endDate: string; years: number;
   totalReturn: number; cagr: number; maxDrawdown: number; sharpe: number;
   switches: number; timeInvestedPct: number;
@@ -143,13 +145,14 @@ export default function RotationPage() {
   const [bull, setBull] = useState("SSO");
   const [def, setDef] = useState("BIL");
   const [sma, setSma] = useState("200");
+  const [hyst, setHyst] = useState("2");
 
   const [status, setStatus] = useState<RotationStatus | null>(null);
   const [statusErr, setStatusErr] = useState<string | null>(null);
   const [loadingStatus, setLoadingStatus] = useState(true); // caricamento iniziale on-mount
 
-  const [years, setYears] = useState("5");
-  const [folds, setFolds] = useState("4");
+  const [years, setYears] = useState("33");
+  const [folds, setFolds] = useState("6");
   const [account, setAccount] = useState("10000");
   const [bt, setBt] = useState<BtResult | null>(null);
   const [btErr, setBtErr] = useState<string | null>(null);
@@ -157,9 +160,9 @@ export default function RotationPage() {
 
   // Nessun setState sincrono qui dentro: lo spinner viene acceso dal chiamante
   // (stato iniziale true per il mount, onClick per gli aggiornamenti manuali).
-  const loadStatus = useCallback(async (b: string, d: string, s: string) => {
+  const loadStatus = useCallback(async (b: string, d: string, s: string, h: string) => {
     try {
-      const res = await fetch(`/api/rotation/analyze?bull=${b}&def=${d}&sma=${s}`, { cache: "no-store" });
+      const res = await fetch(`/api/rotation/analyze?bull=${b}&def=${d}&sma=${s}&hyst=${h}`, { cache: "no-store" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Errore");
       setStatus(data);
@@ -174,7 +177,7 @@ export default function RotationPage() {
   // Caricamento iniziale: setState solo dentro le callback della promise
   // (la regola react-hooks vieta chiamate sincrone a funzioni con setState).
   useEffect(() => {
-    fetch(`/api/rotation/analyze?bull=SSO&def=BIL&sma=200`, { cache: "no-store" })
+    fetch(`/api/rotation/analyze?bull=SSO&def=BIL&sma=200&hyst=2`, { cache: "no-store" })
       .then(async (res) => {
         const data = await res.json();
         if (!res.ok) throw new Error(data.error ?? "Errore");
@@ -190,7 +193,8 @@ export default function RotationPage() {
     setBtErr(null);
     setBt(null);
     try {
-      const qs = `bull=${bull}&def=${def}&sma=${sma}&years=${years}&folds=${folds}&account=${account}`;
+      const deep = Number(years) > 5 ? "1" : "0";
+      const qs = `bull=${bull}&def=${def}&sma=${sma}&hyst=${hyst}&years=${years}&deep=${deep}&folds=${folds}&account=${account}`;
       const res = await fetch(`/api/rotation/backtest?${qs}`, { cache: "no-store" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Errore");
@@ -209,10 +213,11 @@ export default function RotationPage() {
       <header className="mb-6">
         <h1 className="text-3xl font-bold tracking-tight gradient-text">🔄 Rotazione a leva</h1>
         <p className="text-sm text-[var(--muted)] mt-1 max-w-2xl">
-          &quot;Leverage for the Long Run&quot; (Gayed, 2016): quando SPY chiude sopra la sua media a{" "}
-          {sma} giorni sei investito al 100% nell&apos;asset a leva; quando chiude sotto, sei in T-bill.
-          Una regola sola, ~5 switch l&apos;anno. La leva genera l&apos;extra-rendimento, il filtro la rende
-          sopravvivibile evitando chop e crash.
+          &quot;Leverage for the Long Run&quot; (Gayed, 2016): SPY sopra la media a {sma} giorni → 100%
+          nell&apos;asset a leva; sotto → T-bill. La banda anti-whipsaw (±2%, validata su 33 anni)
+          evita gli switch ravvicinati nei laterali: esci solo sotto SMA−2%, rientri solo sopra
+          SMA+2%. Su 1993-2026 (4 bear market): CAGR 14,6% vs 10,9% di SPY, drawdown 39% vs 55%,
+          batte SPY in 6/6 periodi walk-forward, ~2 switch l&apos;anno.
         </p>
       </header>
 
@@ -238,8 +243,17 @@ export default function RotationPage() {
             <option value="250">250</option>
           </select>
         </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-[10px] uppercase text-[var(--muted)]">Banda anti-whipsaw</span>
+          <select value={hyst} onChange={(e) => setHyst(e.target.value)} className="input" disabled={loadingStatus || running}>
+            <option value="0">off (SMA secca)</option>
+            <option value="1">±1%</option>
+            <option value="2">±2% (validata)</option>
+            <option value="3">±3%</option>
+          </select>
+        </label>
         <button
-          onClick={() => { setLoadingStatus(true); loadStatus(bull, def, sma); }}
+          onClick={() => { setLoadingStatus(true); loadStatus(bull, def, sma, hyst); }}
           disabled={loadingStatus}
           className="btn-primary"
         >
@@ -294,10 +308,11 @@ export default function RotationPage() {
       {/* Risk notes */}
       <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 mb-6 text-xs text-[var(--muted)] space-y-1">
         <p className="font-medium text-[var(--foreground)]">Rischi da conoscere prima di usarla</p>
-        <p>• <strong>Whipsaw</strong>: nei laterali attorno alla SMA accumuli piccoli switch in perdita (anni tipo 2011/2015 sottoperformano).</p>
+        <p>• <strong>Whipsaw</strong>: mitigato dalla banda ±2% ma non eliminato — in un laterale lungo la strategia sottoperforma.</p>
         <p>• <strong>Gap risk</strong>: il segnale è al close — un crash overnight lo subisci a leva piena.</p>
-        <p>• <strong>TQQQ</strong> è un tilt tech con leva 3×: drawdown attesi &gt;35% anche col filtro. Da satellite, non da core.</p>
-        <p>• La validazione locale copre ~4-5 anni; l&apos;evidenza lunga (1928-2020) è nel paper di Gayed, non riproducibile con i dati Yahoo.</p>
+        <p>• <strong>TQQQ</strong>: su 33 anni fa CAGR ~20% ma con drawdown misurato dell&apos;<strong>87%</strong> (dot-com). Da satellite con soldi che puoi perdere, mai da core.</p>
+        <p>• Anche la strategia core ha visto <strong>−39%</strong> di drawdown (2008): batte SPY sul ciclo, non ti risparmia i momenti brutti.</p>
+        <p>• Prima del 2006 SSO non esisteva: il backtest lungo usa una serie sintetica (2× rendimento SPY − costi − finanziamento a tasso T-bill); il tracking verso l&apos;ETF reale è misurato e mostrato nei risultati.</p>
       </div>
 
       {/* Backtest */}
@@ -307,10 +322,11 @@ export default function RotationPage() {
           <label className="flex flex-col gap-1">
             <span className="text-[10px] uppercase text-[var(--muted)]">Anni di storia</span>
             <select value={years} onChange={(e) => setYears(e.target.value)} className="input" disabled={running}>
-              <option value="2">2</option>
               <option value="3">3</option>
-              <option value="4">4</option>
-              <option value="5">5 (max, include 2022)</option>
+              <option value="5">5 (include 2022)</option>
+              <option value="10">10 (include 2020)</option>
+              <option value="20">20 (include 2008)</option>
+              <option value="33">33 (include dot-com)</option>
             </select>
           </label>
           <label className="flex flex-col gap-1">
@@ -341,7 +357,9 @@ export default function RotationPage() {
           <>
             <div className="mb-4 text-xs text-[var(--muted)] rounded-lg bg-[var(--surface)] border border-[var(--border)] p-3">
               {bt.startDate} → {bt.endDate} ({bt.years} anni) · {bt.switches} switch ·{" "}
-              {bt.timeInvestedPct}% del tempo investito in {bt.config.bull} · slippage sugli switch incluso
+              {bt.timeInvestedPct}% del tempo investito in {bt.config.bull} · banda ±{bt.hysteresisPct}% ·
+              slippage sugli switch incluso
+              {bt.dataNote && <> · <span className="text-[var(--warning)]">{bt.dataNote}</span></>}
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">

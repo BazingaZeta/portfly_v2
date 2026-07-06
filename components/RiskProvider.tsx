@@ -25,11 +25,15 @@ export function RiskProvider({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    const a = Number(localStorage.getItem("risk.accountSize"));
-    const r = Number(localStorage.getItem("risk.riskPct"));
-    if (Number.isFinite(a) && a > 0) setAccountSizeState(a);
-    if (Number.isFinite(r) && r > 0) setRiskPctState(r);
-    setReady(true);
+    // Deferito di un tick: setState sincrono nel corpo dell'effect causa render a cascata.
+    const t = setTimeout(() => {
+      const a = Number(localStorage.getItem("risk.accountSize"));
+      const r = Number(localStorage.getItem("risk.riskPct"));
+      if (Number.isFinite(a) && a > 0) setAccountSizeState(a);
+      if (Number.isFinite(r) && r > 0) setRiskPctState(r);
+      setReady(true);
+    }, 0);
+    return () => clearTimeout(t);
   }, []);
 
   const setAccountSize = useCallback((n: number) => {

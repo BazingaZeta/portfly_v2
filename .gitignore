@@ -42,3 +42,6 @@ next-env.d.ts
 
 # Local data (SQLite DB)
 /data
+
+# candle cache (best-effort, ricostruibile)
+.cache/

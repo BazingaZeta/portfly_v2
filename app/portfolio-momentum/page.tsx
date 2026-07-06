@@ -488,10 +488,11 @@ function BacktestPanel({ indexKey }: { indexKey: string }) {
   const { t } = useI18n();
   const { accountSize, riskPct } = useRisk();
 
-  const today = new Date().toISOString().slice(0, 10);
-  const twoYearsAgo = new Date(Date.now() - 2 * 365.25 * 86_400_000).toISOString().slice(0, 10);
-
-  const [startDate, setStartDate] = useState(twoYearsAgo);
+  // Lazy init: niente chiamate impure nel corpo del render.
+  const [today] = useState(() => new Date().toISOString().slice(0, 10));
+  const [startDate, setStartDate] = useState(() =>
+    new Date(Date.now() - 2 * 365.25 * 86_400_000).toISOString().slice(0, 10)
+  );
   const [endDate, setEndDate] = useState(today);
   const [account, setAccount] = useState(String(accountSize));
   const [risk, setRisk] = useState(String(riskPct));
@@ -930,9 +931,11 @@ export default function PortfolioMomentumPage() {
   }, []);
 
   useEffect(() => {
-    loadPortfolio();
+    // Primo load deferito di un tick: setState sincrono nel corpo dell'effect
+    // causa render a cascata (regola react-hooks).
+    const t = setTimeout(loadPortfolio, 0);
     const id = setInterval(loadPortfolio, 30_000);
-    return () => clearInterval(id);
+    return () => { clearTimeout(t); clearInterval(id); };
   }, [loadPortfolio]);
 
   return (

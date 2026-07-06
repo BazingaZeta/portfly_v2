@@ -3,8 +3,10 @@ import { after } from "next/server";
 import {
   runTick, getAutoState, getAutoLog, getAutoTrades, getAutoEquityCurve,
   startAutopilot, resetAutopilot, getAutoStateRow, getAutopilotStrategy,
+  getKillSwitch, resumeAutopilot, setMaxDd,
   type AutopilotStrategy,
 } from "@/lib/autopilotEngine";
+import { telegramConfigured } from "@/lib/notify";
 import { fetchQuotes, fetchMarketStatus } from "@/lib/marketData";
 import { AUTO_UNIVERSE } from "@/lib/autopilot";
 import { getAutoPositions } from "@/lib/db";
@@ -29,11 +31,12 @@ async function snapshot() {
     ]),
   ];
   const [prices, market] = await Promise.all([fetchQuotes(quoteList), fetchMarketStatus()]);
-  const [state, log, trades, equity] = await Promise.all([
+  const [state, log, trades, equity, kill] = await Promise.all([
     getAutoState((t) => prices[t] ?? 0),
     getAutoLog(80),
     getAutoTrades(40),
     getAutoEquityCurve(),
+    getKillSwitch(),
   ]);
   return {
     state,
@@ -42,6 +45,7 @@ async function snapshot() {
     log,
     trades,
     equity,
+    kill: { ...kill, telegram: telegramConfigured() },
   };
 }
 
@@ -87,6 +91,10 @@ export async function POST(req: NextRequest) {
   } else if (action === "reset") {
     await resetAutopilot();
     return NextResponse.json({ ok: true, reset: true });
+  } else if (action === "resume") {
+    await resumeAutopilot();
+  } else if (action === "setMaxDd") {
+    await setMaxDd(Number(body.maxDdPct) || 25);
   } else {
     return NextResponse.json({ error: "action non valida" }, { status: 400 });
   }

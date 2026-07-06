@@ -25,10 +25,31 @@ interface Summary {
   worst: ClosedTrade | null;
 }
 
+interface RealizedStats {
+  count: number;
+  winRate: number | null;
+  profitFactor: number | null;
+  totalRealized: number;
+}
+interface RealityCheck {
+  sentiment: { realized: RealizedStats; ref: { pf: number; winRate: number; note: string } };
+  momentum: { realized: RealizedStats; ref: { pf: number; winRate: number; note: string } };
+  autopilot: {
+    days: number;
+    strategyReturn: number;
+    spyReturn: number | null;
+    maxDrawdown: number;
+    startedAt: string | null;
+  } | null;
+  sentimentHistoryDays: number;
+  sentimentAbReady: boolean;
+}
+
 export default function PerformancePage() {
   const { t } = useI18n();
   const [summary, setSummary] = useState<Summary | null>(null);
   const [closed, setClosed] = useState<ClosedTrade[]>([]);
+  const [reality, setReality] = useState<RealityCheck | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -39,6 +60,7 @@ export default function PerformancePage() {
         const data = await res.json();
         setSummary(data.summary ?? null);
         setClosed(data.closed ?? []);
+        setReality(data.realityCheck ?? null);
       } finally {
         setLoading(false);
       }
@@ -51,6 +73,8 @@ export default function PerformancePage() {
         <h1 className="text-3xl font-bold tracking-tight gradient-text">{t("perf.title")}</h1>
         <p className="text-sm text-[var(--muted)] mt-1">{t("perf.subtitle")}</p>
       </header>
+
+      {!loading && reality && <RealityCheckSection r={reality} />}
 
       {loading ? (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -171,5 +195,106 @@ function HighlightCard({ label, trade, tone }: { label: string; trade: ClosedTra
         {money(trade.realized)} ({pct(trade.returnPct)})
       </p>
     </div>
+  );
+}
+
+// ─── Reality check: realizzato vs backtest ────────────────────────────────────
+// L'unico vero out-of-sample sono i trade reali e il paper trading dell'autopilot.
+// Questa sezione li confronta con i riferimenti dei backtest walk-forward: se
+// divergono a lungo, o il mercato è cambiato o il backtest era ottimista.
+
+function RealityRow({
+  label,
+  realized,
+  reference,
+}: {
+  label: string;
+  realized: { count: number; winRate: number | null; profitFactor: number | null; totalRealized: number };
+  reference: { pf: number; winRate: number; note: string };
+}) {
+  const enough = realized.count >= 20;
+  return (
+    <tr className="border-b border-[var(--border)] last:border-0">
+      <td className="px-3 py-2 font-medium">{label}</td>
+      <td className="px-3 py-2 text-right font-mono">{realized.count}</td>
+      <td className="px-3 py-2 text-right font-mono">
+        {realized.winRate != null ? `${realized.winRate}%` : "—"}
+        <span className="text-[var(--muted)]"> / {reference.winRate}%</span>
+      </td>
+      <td className="px-3 py-2 text-right font-mono">
+        {realized.profitFactor != null ? realized.profitFactor : "—"}
+        <span className="text-[var(--muted)]"> / {reference.pf}</span>
+      </td>
+      <td className={`px-3 py-2 text-right font-mono ${realized.totalRealized >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>
+        {money(realized.totalRealized)}
+      </td>
+      <td className="px-3 py-2 text-[10px] text-[var(--muted)]">
+        {enough ? reference.note : `campione piccolo (${realized.count} trade): serve pazienza, non conclusioni`}
+      </td>
+    </tr>
+  );
+}
+
+function RealityCheckSection({ r }: { r: RealityCheck }) {
+  return (
+    <section className="mb-8">
+      <h2 className="text-sm font-medium text-[var(--muted)] uppercase tracking-wide mb-1">
+        🔬 Reality check — realizzato vs backtest
+      </h2>
+      <p className="text-[11px] text-[var(--muted)] mb-3 max-w-2xl">
+        I trade reali e il paper trading sono l&apos;unico vero out-of-sample. Formato:
+        <span className="font-mono"> reale / atteso dal backtest</span>. I riferimenti hanno
+        survivorship bias: un realizzato un po&apos; sotto è normale.
+      </p>
+
+      <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] overflow-hidden overflow-x-auto mb-3">
+        <table className="w-full text-xs min-w-[560px]">
+          <thead className="bg-[var(--surface-2)] text-[10px] uppercase text-[var(--muted)]">
+            <tr>
+              <th className="px-3 py-2 text-left">Strategia</th>
+              <th className="px-3 py-2 text-right">Trade chiusi</th>
+              <th className="px-3 py-2 text-right">Win% (reale/att.)</th>
+              <th className="px-3 py-2 text-right">PF (reale/att.)</th>
+              <th className="px-3 py-2 text-right">P&L</th>
+              <th className="px-3 py-2 text-left">Nota</th>
+            </tr>
+          </thead>
+          <tbody>
+            <RealityRow label="📊 Sentiment (manuale)" realized={r.sentiment.realized} reference={r.sentiment.ref} />
+            <RealityRow label="⚡ Momentum RS" realized={r.momentum.realized} reference={r.momentum.ref} />
+          </tbody>
+        </table>
+      </div>
+
+      {r.autopilot && (
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 mb-3 text-xs flex flex-wrap gap-x-6 gap-y-1">
+          <span className="font-medium">🤖 Autopilot (paper)</span>
+          <span>
+            dal {r.autopilot.startedAt?.slice(0, 10) ?? "?"} ({r.autopilot.days} snapshot):{" "}
+            <span className={`font-mono font-semibold ${r.autopilot.strategyReturn >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>
+              {r.autopilot.strategyReturn >= 0 ? "+" : ""}{r.autopilot.strategyReturn}%
+            </span>
+            {r.autopilot.spyReturn != null && (
+              <span className="text-[var(--muted)]"> vs SPY {r.autopilot.spyReturn >= 0 ? "+" : ""}{r.autopilot.spyReturn}%</span>
+            )}
+          </span>
+          <span className="text-[var(--muted)]">max DD <span className="font-mono">-{r.autopilot.maxDrawdown}%</span></span>
+        </div>
+      )}
+
+      <div
+        className={`rounded-xl border p-3 text-xs ${
+          r.sentimentAbReady
+            ? "border-[var(--positive)]/40 bg-[var(--positive)]/8 text-[var(--positive)]"
+            : "border-[var(--border)] bg-[var(--surface)] text-[var(--muted)]"
+        }`}
+      >
+        {r.sentimentAbReady ? (
+          <>✅ <strong>Storico sentiment pronto per la validazione A/B</strong>: {r.sentimentHistoryDays} giorni di scan registrati (≥60). Si può misurare se il layer news (+/−18/22 punti) aggiunge valore reale al segnale tecnico.</>
+        ) : (
+          <>🧪 Storico sentiment per la validazione A/B del layer news: <span className="font-mono">{r.sentimentHistoryDays}/60</span> giorni di scan raccolti. Ogni scan giornaliera aggiunge dati.</>
+        )}
+      </div>
+    </section>
   );
 }

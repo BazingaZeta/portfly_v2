@@ -16,6 +16,9 @@ export async function GET(req: NextRequest) {
       accountSize: sp.get("account") ? Number(sp.get("account")) : undefined,
       slippageBps: sp.get("slip") ? Number(sp.get("slip")) : undefined,
       folds: sp.get("folds") ? Number(sp.get("folds")) : undefined,
+      deep: sp.get("deep") === "1",
+      hysteresisPct: sp.get("hyst") ? Number(sp.get("hyst")) : undefined,
+      mode: sp.get("mode") === "ladder" ? ("ladder" as const) : undefined,
     });
     return NextResponse.json(result);
   } catch (err) {

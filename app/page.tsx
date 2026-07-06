@@ -75,16 +75,20 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    load().then((data) => {
-      refreshPrices((data.recommendations ?? []).map((x) => x.ticker));
-      // Auto-scan: if today hasn't been scanned yet, run it automatically.
-      const today = new Date().toISOString().slice(0, 10);
-      if (!autoStarted.current && data.lastScanAttempt !== today) {
-        autoStarted.current = true;
-        setAutoScanning(true);
-        runScan();
-      }
-    });
+    // Deferito di un tick: setState sincrono nel corpo dell'effect causa render a cascata.
+    const timer = setTimeout(() => {
+      load().then((data) => {
+        refreshPrices((data.recommendations ?? []).map((x) => x.ticker));
+        // Auto-scan: if today hasn't been scanned yet, run it automatically.
+        const today = new Date().toISOString().slice(0, 10);
+        if (!autoStarted.current && data.lastScanAttempt !== today) {
+          autoStarted.current = true;
+          setAutoScanning(true);
+          runScan();
+        }
+      });
+    }, 0);
+    return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [load, refreshPrices]);
 
