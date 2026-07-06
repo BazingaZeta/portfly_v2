@@ -5,6 +5,7 @@ import type { Position } from "@/lib/types";
 import { useI18n } from "@/components/I18nProvider";
 import { useRisk } from "@/components/RiskProvider";
 import { RiskSettings } from "@/components/RiskSettings";
+import { LoadingPanel } from "@/components/Loading";
 import type { TFunc } from "@/lib/i18n";
 import { money, pct } from "@/lib/format";
 
@@ -666,6 +667,7 @@ export default function PortfolioSentimentPage() {
   const [positions, setPositions] = useState<Position[]>([]);
   const [perfSummary, setPerfSummary] = useState<PerfSummary | null>(null);
   const [perfClosed, setPerfClosed] = useState<ClosedTrade[]>([]);
+  const [loaded, setLoaded] = useState(false); // primo fetch completato: prima mostra lo spinner, non l'empty state
 
   const loadPortfolio = useCallback(async () => {
     try {
@@ -676,6 +678,8 @@ export default function PortfolioSentimentPage() {
       setPositions(all.filter((p) => p.source === "main"));
     } catch {
       /* ignore */
+    } finally {
+      setLoaded(true);
     }
   }, []);
 
@@ -710,9 +714,15 @@ export default function PortfolioSentimentPage() {
         </p>
       </header>
 
-      <PositionsPanel positions={positions} onChanged={() => { loadPortfolio(); loadPerformance(); }} />
-      <PerformancePanel summary={perfSummary} />
-      <TradeHistoryPanel closed={perfClosed} />
+      {!loaded ? (
+        <LoadingPanel label="Carico il portafoglio…" />
+      ) : (
+        <>
+          <PositionsPanel positions={positions} onChanged={() => { loadPortfolio(); loadPerformance(); }} />
+          <PerformancePanel summary={perfSummary} />
+          <TradeHistoryPanel closed={perfClosed} />
+        </>
+      )}
       <BacktestPanel />
     </div>
   );

@@ -5,6 +5,7 @@ import { money } from "@/lib/format";
 import { useI18n } from "@/components/I18nProvider";
 import { useRisk } from "@/components/RiskProvider";
 import { INDICES } from "@/lib/indices";
+import { LoadingPanel } from "@/components/Loading";
 
 interface Position {
   indexKey: string;
@@ -916,6 +917,7 @@ export default function PortfolioMomentumPage() {
   const [trades, setTrades] = useState<MomentumTrade[]>([]);
   const [totalPnl, setTotalPnl] = useState(0);
   const [winRate, setWinRate] = useState<number | null>(null);
+  const [loaded, setLoaded] = useState(false); // primo fetch completato: prima mostra lo spinner, non l'empty state
 
   const loadPortfolio = useCallback(async () => {
     try {
@@ -928,6 +930,8 @@ export default function PortfolioMomentumPage() {
       setWinRate(data.winRate ?? null);
     } catch {
       /* ignore */
+    } finally {
+      setLoaded(true);
     }
   }, []);
 
@@ -948,9 +952,15 @@ export default function PortfolioMomentumPage() {
         </p>
       </header>
 
-      <PositionsPanel positions={positions} onChanged={loadPortfolio} />
-      <PerformancePanel trades={trades} totalPnl={totalPnl} winRate={winRate} />
-      <TradeHistoryPanel trades={trades} />
+      {!loaded ? (
+        <LoadingPanel label="Carico il portafoglio…" />
+      ) : (
+        <>
+          <PositionsPanel positions={positions} onChanged={loadPortfolio} />
+          <PerformancePanel trades={trades} totalPnl={totalPnl} winRate={winRate} />
+          <TradeHistoryPanel trades={trades} />
+        </>
+      )}
 
       <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 mb-6 flex items-end gap-3">
         <label className="flex flex-col gap-1">
