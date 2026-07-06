@@ -456,10 +456,19 @@ function PositionRow({ p, spark, onSell }: { p: Position; spark?: number[]; onSe
       <Td right>{p.shares}</Td>
       <Td right>{money(p.avgCost)}</Td>
       <Td right>
-        <span className={`rounded px-1 ${flashCls}`}>
-          {money(p.currentPrice)}
-          {flash && <span className="ml-1 text-xs">{flash === "up" ? "▲" : "▼"}</span>}
-        </span>
+        {p.priceStale ? (
+          <span
+            className="rounded px-1 text-[var(--warning)]"
+            title="Quote live non disponibile: mostrato il costo medio, P&L non affidabile"
+          >
+            ⚠ {money(p.currentPrice)}
+          </span>
+        ) : (
+          <span className={`rounded px-1 ${flashCls}`}>
+            {money(p.currentPrice)}
+            {flash && <span className="ml-1 text-xs">{flash === "up" ? "▲" : "▼"}</span>}
+          </span>
+        )}
       </Td>
       <Td>
         {spark && spark.length > 1 ? (

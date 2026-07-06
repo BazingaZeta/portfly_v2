@@ -12,6 +12,7 @@ interface Position {
   name: string;
   shares: number;
   avgCost: number;
+  priceStale?: boolean;
   currentPrice: number;
   marketValue: number;
   costBasis: number;
@@ -204,7 +205,7 @@ function PositionsPanel({
                     </td>
                     <td className="px-4 py-3 text-right font-mono">{p.shares}</td>
                     <td className="px-4 py-3 text-right font-mono">{money(p.avgCost)}</td>
-                    <td className="px-4 py-3 text-right font-mono">{money(p.currentPrice)}</td>
+                    <td className="px-4 py-3 text-right font-mono">{p.priceStale && <span title="Quote live non disponibile: mostrato il costo medio" className="text-[var(--warning)] mr-1">⚠</span>}{money(p.currentPrice)}</td>
                     <td className="px-4 py-3 text-right">
                       <div className={`font-mono font-semibold ${p.unrealizedPnl >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>
                         {p.unrealizedPnl >= 0 ? "+" : ""}{money(p.unrealizedPnl)}

@@ -243,7 +243,7 @@ function LeaderCard({
         />
       )}
       <div
-        className={`rounded-xl border bg-[var(--surface)] p-4 flex flex-col gap-3 ${
+        className={`card-hover rounded-xl border bg-[var(--surface)] p-4 flex flex-col gap-3 ${
           leader.signal === "BUY"
             ? "border-[var(--positive)]/40"
             : leader.signal === "WAIT"
@@ -495,7 +495,7 @@ export default function MomentumPage() {
                   {filtered.length} titoli · benchmark: {INDICES.find((i) => i.key === indexKey)?.proxy}
                 </span>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div className="stagger grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {filtered.map((l) => (
                   <LeaderCard key={l.ticker} leader={l} indexKey={indexKey} onTrade={() => {}} />
                 ))}

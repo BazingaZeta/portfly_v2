@@ -56,6 +56,53 @@ body::before {
   pointer-events: none;
 }
 
+/* ---- Dynamic atmospheric backdrop ----
+   Tre blob sfocati che derivano lentissimi (cicli 90-150s, solo transform →
+   GPU-friendly). Opacità bassissima: profondità, non distrazione. */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+}
+.backdrop span {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(90px);
+  opacity: 0.5;
+  will-change: transform;
+}
+.backdrop span:nth-child(1) {
+  width: 44rem; height: 44rem; left: -12rem; top: -14rem;
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent) 14%, transparent), transparent 70%);
+  animation: drift1 110s ease-in-out infinite;
+}
+.backdrop span:nth-child(2) {
+  width: 38rem; height: 38rem; right: -10rem; top: 20%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent-3) 11%, transparent), transparent 70%);
+  animation: drift2 140s ease-in-out infinite;
+}
+.backdrop span:nth-child(3) {
+  width: 42rem; height: 42rem; left: 30%; bottom: -18rem;
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent-2) 9%, transparent), transparent 70%);
+  animation: drift3 95s ease-in-out infinite;
+}
+@keyframes drift1 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(6rem, 4rem) scale(1.12); }
+  66% { transform: translate(-3rem, 7rem) scale(0.95); }
+}
+@keyframes drift2 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  40% { transform: translate(-7rem, -5rem) scale(1.08); }
+  75% { transform: translate(-2rem, 5rem) scale(0.92); }
+}
+@keyframes drift3 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(5rem, -6rem) scale(1.1); }
+}
+
 * {
   border-color: var(--border);
 }
@@ -154,6 +201,24 @@ body::before {
 }
 .animate-in { animation: fadeInUp 0.45s cubic-bezier(0.22, 1, 0.36, 1) backwards; }
 
+/* Ogni pagina entra con una dissolvenza morbida (route change incluso). */
+main > * {
+  animation: fadeInUp 0.4s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+/* I figli di una griglia .stagger entrano in sequenza (max 12 comodi). */
+.stagger > * { animation: fadeInUp 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+.stagger > *:nth-child(1) { animation-delay: 0.03s; }
+.stagger > *:nth-child(2) { animation-delay: 0.07s; }
+.stagger > *:nth-child(3) { animation-delay: 0.11s; }
+.stagger > *:nth-child(4) { animation-delay: 0.15s; }
+.stagger > *:nth-child(5) { animation-delay: 0.19s; }
+.stagger > *:nth-child(6) { animation-delay: 0.23s; }
+.stagger > *:nth-child(7) { animation-delay: 0.27s; }
+.stagger > *:nth-child(8) { animation-delay: 0.31s; }
+.stagger > *:nth-child(9) { animation-delay: 0.35s; }
+.stagger > *:nth-child(n + 10) { animation-delay: 0.4s; }
+
 /* Pulsing "live" dot */
 @keyframes pulseDot {
   0%, 100% { opacity: 1; transform: scale(1); }
@@ -199,8 +264,16 @@ body::before {
 
 button { cursor: pointer; }
 
+/* Focus ring accessibile e coerente col tema */
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: 2px;
+  border-radius: 0.4rem;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .flash-up, .flash-down, .animate-in, .live-dot, .arrow-pop, .skeleton {
+  .flash-up, .flash-down, .animate-in, .live-dot, .arrow-pop, .skeleton,
+  .backdrop span, main > *, .stagger > * {
     animation: none !important;
   }
   .card-hover:hover { transform: none; }

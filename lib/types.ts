@@ -113,6 +113,8 @@ export interface Position {
   name?: string;
   shares: number;
   avgCost: number;
+  /** true se la quote live non era disponibile: currentPrice = costo medio, P&L non affidabile. */
+  priceStale?: boolean;
   currentPrice: number;
   marketValue: number;
   costBasis: number;

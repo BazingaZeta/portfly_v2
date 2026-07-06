@@ -224,7 +224,7 @@ export default function Dashboard() {
       )}
 
       {!loading && recs.length > 0 && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+        <div className="stagger grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
           <StatTile label={t("dash.statSignals")} value={String(recs.length)} accent="var(--accent)" />
           <StatTile label={t("dash.statAvgScore")} value={String(avgScore)} accent="var(--accent-2)" />
           <StatTile
@@ -313,7 +313,7 @@ export default function Dashboard() {
       )}
 
       {loading ? (
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="stagger grid gap-4 sm:grid-cols-2">
           {Array.from({ length: 4 }).map((_, i) => (
             <div key={i} className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
               <div className="flex items-center gap-4">
@@ -343,7 +343,7 @@ export default function Dashboard() {
           <p className="text-xs text-[var(--muted)] mb-3">
             {t("dash.count", { n: visible.length, total: recs.length })}
           </p>
-          <div className="grid gap-4 sm:grid-cols-2">
+          <div className="stagger grid gap-4 sm:grid-cols-2">
             {visible.map((rec, i) => (
               <SignalCard
                 key={rec.id}
