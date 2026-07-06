@@ -50,10 +50,13 @@ export default function AutopilotPage() {
   }, []);
 
   useEffect(() => {
-    load();
-    runBacktest(); // show the strategy chart immediately (live equity needs several days)
+    // Deferito di un tick: setState sincrono nel corpo dell'effect causa render a cascata.
+    const t = setTimeout(() => {
+      load();
+      runBacktest(); // show the strategy chart immediately (live equity needs several days)
+    }, 0);
     const id = setInterval(load, 60_000); // refresh P&L while open
-    return () => clearInterval(id);
+    return () => { clearTimeout(t); clearInterval(id); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [load]);
 

@@ -206,11 +206,11 @@ function HighlightCard({ label, trade, tone }: { label: string; trade: ClosedTra
 function RealityRow({
   label,
   realized,
-  ref: reference,
+  reference,
 }: {
   label: string;
   realized: { count: number; winRate: number | null; profitFactor: number | null; totalRealized: number };
-  ref: { pf: number; winRate: number; note: string };
+  reference: { pf: number; winRate: number; note: string };
 }) {
   const enough = realized.count >= 20;
   return (
@@ -260,8 +260,8 @@ function RealityCheckSection({ r }: { r: RealityCheck }) {
             </tr>
           </thead>
           <tbody>
-            <RealityRow label="📊 Sentiment (manuale)" realized={r.sentiment.realized} ref={r.sentiment.ref} />
-            <RealityRow label="⚡ Momentum RS" realized={r.momentum.realized} ref={r.momentum.ref} />
+            <RealityRow label="📊 Sentiment (manuale)" realized={r.sentiment.realized} reference={r.sentiment.ref} />
+            <RealityRow label="⚡ Momentum RS" realized={r.momentum.realized} reference={r.momentum.ref} />
           </tbody>
         </table>
       </div>

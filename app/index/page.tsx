@@ -91,9 +91,10 @@ export default function IndexTraderPage() {
   }, []);
 
   useEffect(() => {
-    loadPositions();
+    // Deferito di un tick: setState sincrono nel corpo dell'effect causa render a cascata.
+    const t = setTimeout(loadPositions, 0);
     const id = setInterval(loadPositions, 30_000);
-    return () => clearInterval(id);
+    return () => { clearTimeout(t); clearInterval(id); };
   }, [loadPositions]);
 
   function analyze() {

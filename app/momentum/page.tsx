@@ -398,7 +398,7 @@ export default function MomentumPage() {
       <header className="mb-6">
         <h1 className="text-3xl font-bold tracking-tight gradient-text">⚡ Momentum RS</h1>
         <p className="text-sm text-[var(--muted)] mt-1 max-w-2xl">
-          Calcola il metatitolo (stock÷SPY) per ogni costituente dell'indice e applica canali di regressione
+          Calcola il metatitolo (stock÷SPY) per ogni costituente dell&apos;indice e applica canali di regressione
           sul rapporto. Segnale <strong>COMPRA</strong> quando il metatitolo è in trend ascendente vicino alla
           banda bassa — il titolo sta guidando il benchmark e si trova in un punto di forza relativa favorevole.
         </p>
