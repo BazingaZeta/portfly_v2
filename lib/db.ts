@@ -495,6 +495,15 @@ export async function getAutoEquity(limit = 500): Promise<AutoEquity[]> {
   return r.rows.map((row) => { const ro = row as Record<string, unknown>; return { ts: s(ro.ts), equity: n(ro.equity) }; });
 }
 
+// ─── Sentiment history ────────────────────────────────────────────────────────
+
+/** Giorni distinti di scan con sentiment registrato (per il gate di validazione A/B). */
+export async function countSentimentHistoryDays(): Promise<number> {
+  const client = await db();
+  const r = await client.execute(`SELECT COUNT(DISTINCT scan_date) as n FROM sentiment_history`);
+  return Number(r.rows[0]?.n ?? 0);
+}
+
 // ─── Whitelist ────────────────────────────────────────────────────────────────
 
 export async function isEmailWhitelisted(email: string): Promise<boolean> {
