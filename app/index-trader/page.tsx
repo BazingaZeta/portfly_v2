@@ -1,11 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { money, pct } from "@/lib/format";
 import { useI18n } from "@/components/I18nProvider";
 import { useRisk } from "@/components/RiskProvider";
 import { LogoBadge } from "@/components/LogoBadge";
 import { ChannelChart } from "@/components/ChannelChart";
+import { PortfolioEquityPanel } from "@/components/PortfolioEquityPanel";
+import { useLivePrices, LivePrice, LiveBadge, applyLivePrices } from "@/components/LivePrice";
+import type { MarketStatus } from "@/lib/marketHours";
 import { positionSize } from "@/lib/risk";
 import { INDICES } from "@/lib/indices";
 import type { RegressionChannel } from "@/lib/regression";
@@ -98,6 +101,13 @@ export default function IndexTraderPage() {
     return () => { clearTimeout(t); clearInterval(id); };
   }, [loadPositions]);
 
+  // Prezzi live ~5s: aggiorna prezzo e P&L delle posizioni senza ricaricare tutto.
+  const { prices: livePrices, market } = useLivePrices(positions.map((p) => p.ticker));
+  const livePositions = useMemo(
+    () => applyLivePrices(positions, livePrices),
+    [positions, livePrices],
+  );
+
   function analyze() {
     setAnalyzing(true);
     setError(null);
@@ -139,6 +149,8 @@ export default function IndexTraderPage() {
         <p className="text-sm text-[var(--muted)] mt-1">{t("idx.subtitle")}</p>
       </header>
 
+      <PortfolioEquityPanel strategy="index" />
+
       <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 mb-6 flex flex-wrap items-end gap-3">
         <label className="flex flex-col gap-1">
           <span className="text-[10px] uppercase text-[var(--muted)]">{t("idx.index")}</span>
@@ -179,7 +191,7 @@ export default function IndexTraderPage() {
       )}
 
       {/* Open positions (isolated) */}
-      {positions.length > 0 && <PositionsPanel positions={positions} onChanged={loadPositions} t={t} />}
+      {positions.length > 0 && <PositionsPanel positions={livePositions} onChanged={loadPositions} market={market} t={t} />}
 
       {/* Closed trades & realized P&L (isolated to the Index Trader) */}
       <ClosedPanel trades={trades} t={t} />
@@ -479,10 +491,12 @@ function ClosedPanel({
 function PositionsPanel({
   positions,
   onChanged,
+  market,
   t,
 }: {
   positions: IndexPosition[];
   onChanged: () => void;
+  market?: MarketStatus;
   t: (k: string, p?: Record<string, string | number>) => string;
 }) {
   async function sell(p: IndexPosition) {
@@ -496,7 +510,10 @@ function PositionsPanel({
 
   return (
     <div className="mb-8">
-      <h2 className="text-sm font-medium text-[var(--muted)] uppercase tracking-wide mb-3">{t("idx.positions")}</h2>
+      <h2 className="text-sm font-medium text-[var(--muted)] uppercase tracking-wide mb-3 flex items-center gap-2">
+        {t("idx.positions")}
+        {market && <LiveBadge market={market} />}
+      </h2>
       <div className="rounded-xl border border-[var(--border)] overflow-hidden overflow-x-auto">
         <table className="w-full text-sm min-w-[640px]">
           <thead className="bg-[var(--surface-2)] text-[var(--muted)] text-xs uppercase">
@@ -523,7 +540,7 @@ function PositionsPanel({
                 </td>
                 <td className="px-3 py-2 text-right">{p.shares}</td>
                 <td className="px-3 py-2 text-right">{money(p.avgCost)}</td>
-                <td className="px-3 py-2 text-right">{p.priceStale && <span title="Quote live non disponibile: mostrato il costo medio" className="text-[var(--warning)] mr-1">⚠</span>}{money(p.currentPrice)}</td>
+                <td className="px-3 py-2 text-right font-mono">{p.priceStale && <span title="Quote live non disponibile: mostrato il costo medio" className="text-[var(--warning)] mr-1">⚠</span>}<LivePrice price={p.currentPrice} format={money} /></td>
                 <td className="px-3 py-2 text-right font-mono" style={{ color: "var(--negative)" }}>{p.stop != null ? money(p.stop) : "—"}</td>
                 <td className="px-3 py-2 text-right" style={{ color: p.unrealizedPnl >= 0 ? "var(--positive)" : "var(--negative)" }}>
                   {money(p.unrealizedPnl)} ({pct(p.unrealizedPnlPct)})

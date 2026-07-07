@@ -21,34 +21,50 @@ import {
   DEFAULT_ROTATION,
   type RotationConfig,
 } from "./leverageRotation";
+import {
+  cryptoTrendDecision,
+  normalizeCryptoTrendConfig,
+  CRYPTO_NAMES,
+  DEFAULT_CRYPTO_TREND,
+  type CryptoTrendConfig,
+} from "./cryptoTrend";
 import { fetchQuotes, fetchCandles } from "./marketData";
+import type { Candle } from "./types";
 
-export type AutopilotStrategy = "dual_momentum" | "rotation";
+export type AutopilotStrategy = "dual_momentum" | "rotation" | "crypto_trend";
 
 const STRATEGY_LABELS: Record<AutopilotStrategy, string> = {
   dual_momentum: "Dual Momentum ETF (mensile)",
   rotation: "Rotazione a leva (SPY vs SMA200)",
+  crypto_trend: "Crypto Trend (BTC/ETH sopra trend)",
 };
 
 function nameFor(ticker: string): string {
-  return AUTO_NAMES[ticker] ?? ASSET_NAMES[ticker] ?? ticker;
+  return AUTO_NAMES[ticker] ?? ASSET_NAMES[ticker] ?? CRYPTO_NAMES[ticker] ?? ticker;
 }
 
 export interface AutopilotStrategyInfo {
   strategy: AutopilotStrategy;
   label: string;
   rotation: RotationConfig;
+  crypto: CryptoTrendConfig;
 }
 
 export async function getAutopilotStrategy(): Promise<AutopilotStrategyInfo> {
   const raw = (await getMeta("autopilot_strategy")) as AutopilotStrategy | null;
-  const strategy: AutopilotStrategy = raw === "rotation" ? "rotation" : "dual_momentum";
+  const strategy: AutopilotStrategy =
+    raw === "rotation" ? "rotation" : raw === "crypto_trend" ? "crypto_trend" : "dual_momentum";
   let rotation = DEFAULT_ROTATION;
   try {
     const cfg = await getMeta("autopilot_rotation_config");
     if (cfg) rotation = normalizeRotationConfig(JSON.parse(cfg));
   } catch { /* default */ }
-  return { strategy, label: STRATEGY_LABELS[strategy], rotation };
+  let crypto = DEFAULT_CRYPTO_TREND;
+  try {
+    const cfg = await getMeta("autopilot_crypto_config");
+    if (cfg) crypto = normalizeCryptoTrendConfig(JSON.parse(cfg));
+  } catch { /* default */ }
+  return { strategy, label: STRATEGY_LABELS[strategy], rotation, crypto };
 }
 
 export interface AutoPosition {
@@ -96,13 +112,17 @@ export async function getAutoStateRow(): Promise<StateRow | null> {
 export async function startAutopilot(
   initialCapital = 10000,
   strategy: AutopilotStrategy = "dual_momentum",
-  rotationCfg?: Partial<RotationConfig>
+  rotationCfg?: Partial<RotationConfig>,
+  cryptoCfg?: Partial<CryptoTrendConfig>
 ): Promise<void> {
   const now = new Date().toISOString();
   await resetDbAutoState();
   await setMeta("autopilot_strategy", strategy);
   if (strategy === "rotation") {
     await setMeta("autopilot_rotation_config", JSON.stringify(normalizeRotationConfig(rotationCfg)));
+  }
+  if (strategy === "crypto_trend") {
+    await setMeta("autopilot_crypto_config", JSON.stringify(normalizeCryptoTrendConfig(cryptoCfg)));
   }
   await upsertAutoState({
     cash: initialCapital,
@@ -209,6 +229,18 @@ export async function runTick(force = false): Promise<{ ran: boolean; rebalanced
     const prices = await fetchQuotes(quoteList);
     const spyLast = spy[spy.length - 1]?.close ?? 0;
     priceOf = (t) => prices[t] ?? (t === "SPY" ? spyLast : 0);
+  } else if (stratInfo.strategy === "crypto_trend") {
+    await log(runId, "run", `▶ Avvio ciclo (${stratInfo.label}): scarico BTC/ETH e quote…`);
+    const cfg = stratInfo.crypto;
+    const candlesArr = await Promise.all(cfg.assets.map((a) => fetchCandles(a, 2)));
+    const candlesByAsset: Record<string, Candle[]> = {};
+    cfg.assets.forEach((a, i) => { candlesByAsset[a] = candlesArr[i]; });
+    decision = cryptoTrendDecision(candlesByAsset, cfg);
+    const quoteList = [...new Set([...cfg.assets, ...Object.keys(positions)])];
+    const prices = await fetchQuotes(quoteList);
+    const lastClose: Record<string, number> = {};
+    cfg.assets.forEach((a) => { lastClose[a] = candlesByAsset[a]?.[candlesByAsset[a].length - 1]?.close ?? 0; });
+    priceOf = (t) => prices[t] ?? lastClose[t] ?? 0;
   } else {
     await log(runId, "run", "▶ Avvio ciclo: scarico i dati dell'universo ETF…");
     const candles = await fetchUniverseCandles(2);
@@ -229,10 +261,12 @@ export async function runTick(force = false): Promise<{ ran: boolean; rebalanced
   const targetNotHeld = Object.keys(decision.targets).some((t) => !(t in positions));
   const isNewMonth = state.last_rebalance_month !== month;
   const firstRun = Object.keys(positions).length === 0 && state.last_rebalance_month == null;
-  const shouldRebalance =
-    stratInfo.strategy === "rotation"
-      ? force || firstRun || heldOutOfTarget || targetNotHeld
-      : force || firstRun || isNewMonth || heldOutOfTarget;
+  // Rotation e crypto_trend hanno cadenza giornaliera guidata dal regime (nessun
+  // ribilancio mensile): si opera quando il regime cambia. Dual momentum: mensile.
+  const regimeDriven = stratInfo.strategy === "rotation" || stratInfo.strategy === "crypto_trend";
+  const shouldRebalance = regimeDriven
+    ? force || firstRun || heldOutOfTarget || targetNotHeld
+    : force || firstRun || isNewMonth || heldOutOfTarget;
 
   let rebalanced = false;
   const tradeLines: string[] = [];
@@ -241,7 +275,7 @@ export async function runTick(force = false): Promise<{ ran: boolean; rebalanced
     await log(
       runId,
       "decision",
-      stratInfo.strategy === "rotation"
+      regimeDriven
         ? firstRun
           ? "Prima allocazione secondo il regime attuale."
           : "Cambio di regime: ruoto il portafoglio verso il nuovo target."

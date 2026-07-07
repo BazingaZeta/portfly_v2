@@ -15,16 +15,19 @@ interface State {
 }
 interface LogEntry { ts: string; runId: string; kind: string; message: string; }
 interface Trade { ticker: string; action: string; shares: number; price: number; executedAt: string; reason: string | null; }
+type StrategyKey = "dual_momentum" | "rotation" | "crypto_trend";
 interface StrategyInfo {
-  strategy: "dual_momentum" | "rotation";
+  strategy: StrategyKey;
   label: string;
   rotation: { bull: string; defensive: string; smaPeriod: number };
+  crypto?: { assets: string[]; smaPeriod: number; hysteresisPct: number };
 }
 interface KillInfo { paused: boolean; maxDdPct: number; peakEquity: number | null; telegram: boolean; }
 interface Snapshot { state: State; strategy?: StrategyInfo; market?: { open: boolean; state: string; asOf: string | null }; log: LogEntry[]; trades: Trade[]; equity: { date: string; equity: number }[]; kill?: KillInfo; }
 interface Backtest {
   cagr: number; totalReturn: number; maxDrawdown: number; benchCagr: number;
   benchMaxDrawdown: number; years: number; equity: { date: string; equity: number; bench: number }[];
+  benchLabel?: string;
 }
 
 const KIND_COLOR: Record<string, string> = {
@@ -40,7 +43,7 @@ export default function AutopilotPage() {
   const [bt, setBt] = useState<Backtest | null>(null);
   const [btRunning, setBtRunning] = useState(false);
   const [cycleMsg, setCycleMsg] = useState<string | null>(null);
-  const [strategy, setStrategy] = useState<"rotation" | "dual_momentum">("rotation");
+  const [strategy, setStrategy] = useState<StrategyKey>("rotation");
 
   const load = useCallback(async () => {
     const res = await fetch("/api/autopilot", { cache: "no-store" });
@@ -83,20 +86,26 @@ export default function AutopilotPage() {
     }
   }
 
-  async function runBacktest(which?: "rotation" | "dual_momentum") {
+  async function runBacktest(which?: StrategyKey) {
     setBtRunning(true);
     try {
       const strat = which ?? snap?.strategy?.strategy ?? strategy;
-      if (strat === "rotation") {
-        const res = await fetch("/api/rotation/backtest?years=5", { cache: "no-store" });
+      if (strat === "rotation" || strat === "crypto_trend") {
+        const url = strat === "rotation"
+          ? "/api/rotation/backtest?years=5"
+          : "/api/crypto/backtest?folds=5";
+        const res = await fetch(url, { cache: "no-store" });
         const r = await res.json();
         if (res.ok) {
-          const bench = new Map<string, number>(
-            (r.spyEquity as { date: string; equity: number }[]).map((p) => [p.date, p.equity])
-          );
+          // rotation → spyEquity/spyCagr ; crypto_trend → benchEquity/benchCagr (BTC)
+          const benchCurve = (r.benchEquity ?? r.spyEquity) as { date: string; equity: number }[];
+          const bench = new Map<string, number>(benchCurve.map((p) => [p.date, p.equity]));
           setBt({
             cagr: r.cagr, totalReturn: r.totalReturn, maxDrawdown: r.maxDrawdown,
-            benchCagr: r.spyCagr, benchMaxDrawdown: r.spyMaxDrawdown, years: r.years,
+            benchCagr: r.benchCagr ?? r.spyCagr,
+            benchMaxDrawdown: r.benchMaxDrawdown ?? r.spyMaxDrawdown,
+            years: r.years,
+            benchLabel: strat === "crypto_trend" ? "Bitcoin (buy&hold)" : "S&P 500",
             equity: (r.equity as { date: string; equity: number }[]).map((p) => ({
               date: p.date, equity: p.equity, bench: bench.get(p.date) ?? p.equity,
             })),
@@ -104,7 +113,7 @@ export default function AutopilotPage() {
         }
       } else {
         const res = await fetch("/api/autopilot/backtest", { cache: "no-store" });
-        setBt(await res.json());
+        setBt({ ...(await res.json()), benchLabel: "S&P 500" });
       }
     } finally {
       setBtRunning(false);
@@ -128,12 +137,13 @@ export default function AutopilotPage() {
                 <span className="text-[10px] uppercase text-[var(--muted)]">{t("auto.strategy")}</span>
                 <select
                   value={strategy}
-                  onChange={(e) => setStrategy(e.target.value as "rotation" | "dual_momentum")}
+                  onChange={(e) => setStrategy(e.target.value as StrategyKey)}
                   className="input text-sm"
                   disabled={busy}
                 >
                   <option value="rotation">{t("auto.strategyRotation")}</option>
                   <option value="dual_momentum">{t("auto.strategyDual")}</option>
+                  <option value="crypto_trend">{t("auto.strategyCrypto")}</option>
                 </select>
               </label>
               <button onClick={() => act("start")} disabled={busy} className="btn-primary whitespace-nowrap">
@@ -323,7 +333,7 @@ export default function AutopilotPage() {
             {bt.equity.length > 1 && (
               <div className="mt-4">
                 <Spark data={bt.equity.map((e) => e.equity)} baseline={10000} data2={bt.equity.map((e) => e.bench)} />
-                <p className="text-[10px] text-[var(--muted)] mt-1">— strategia · — S&amp;P 500 · {bt.years} anni</p>
+                <p className="text-[10px] text-[var(--muted)] mt-1">— strategia · — {bt.benchLabel ?? "S&P 500"} · {bt.years} anni</p>
               </div>
             )}
           </>

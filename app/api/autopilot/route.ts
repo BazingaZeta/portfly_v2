@@ -26,6 +26,8 @@ async function snapshot() {
       ...(strategyInfo.strategy === "rotation"
         ? [strategyInfo.rotation.bull,
            ...(strategyInfo.rotation.defensive !== "CASH" ? [strategyInfo.rotation.defensive] : [])]
+        : strategyInfo.strategy === "crypto_trend"
+        ? strategyInfo.crypto.assets
         : AUTO_UNIVERSE),
       ...positions.map((p) => p.ticker),
     ]),
@@ -75,12 +77,16 @@ export async function POST(req: NextRequest) {
   const action = body?.action;
   let rebalanced = false;
   if (action === "start") {
-    const strategy: AutopilotStrategy = body.strategy === "rotation" ? "rotation" : "dual_momentum";
+    const strategy: AutopilotStrategy =
+      body.strategy === "rotation" ? "rotation" : body.strategy === "crypto_trend" ? "crypto_trend" : "dual_momentum";
     await startAutopilot(
       Number(body.capital) > 0 ? Number(body.capital) : 10000,
       strategy,
       strategy === "rotation"
         ? { bull: body.bull, defensive: body.defensive, smaPeriod: Number(body.sma) || undefined }
+        : undefined,
+      strategy === "crypto_trend"
+        ? { assets: body.assets, smaPeriod: Number(body.sma) || undefined, hysteresisPct: Number(body.hysteresis) }
         : undefined
     );
     const r = await runTick(true); // immediately invest
