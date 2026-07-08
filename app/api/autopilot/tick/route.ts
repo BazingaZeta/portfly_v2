@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runTick, getAutoStateRow } from "@/lib/autopilotEngine";
+import { runTick, getAutoStateRow, type AutoTrack } from "@/lib/autopilotEngine";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,16 +23,23 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "non autorizzato" }, { status: 401 });
   }
 
-  if (!(await getAutoStateRow())) {
-    return NextResponse.json({ ran: false, reason: "autopilot non avviato" });
+  // Tick di ENTRAMBE le tracce avviate (main + crypto). Ogni traccia gira solo
+  // se il suo conto è stato avviato; gli errori di una non bloccano l'altra.
+  const tracks: AutoTrack[] = ["main", "crypto"];
+  const results: Record<string, unknown> = {};
+  let anyRan = false;
+  for (const track of tracks) {
+    if (!(await getAutoStateRow(track))) {
+      results[track] = { ran: false, reason: "non avviato" };
+      continue;
+    }
+    try {
+      const r = await runTick(track, false);
+      results[track] = { ran: true, rebalanced: r.rebalanced };
+      anyRan = true;
+    } catch (e) {
+      results[track] = { error: e instanceof Error ? e.message : "tick fallito" };
+    }
   }
-  try {
-    const r = await runTick(false);
-    return NextResponse.json({ ran: true, rebalanced: r.rebalanced, at: new Date().toISOString() });
-  } catch (e) {
-    return NextResponse.json(
-      { error: e instanceof Error ? e.message : "tick fallito" },
-      { status: 500 }
-    );
-  }
+  return NextResponse.json({ ran: anyRan, tracks: results, at: new Date().toISOString() });
 }

@@ -28,16 +28,19 @@ export async function GET() {
 
         const scanDate =
           recs[0]?.scanDate ?? sentimentSamples[0]?.scanDate ?? new Date().toISOString().slice(0, 10);
-        deleteRecommendationsForDate(scanDate);
-        if (recs.length) insertRecommendations(recs);
+        // ATTENDI le scritture prima di segnalare "complete": il client ricarica
+        // /api/recommendations appena riceve l'evento, e senza await la ricarica
+        // corre tra il DELETE e l'INSERT → tabella vuota → "nessun segnale".
+        await deleteRecommendationsForDate(scanDate);
+        if (recs.length) await insertRecommendations(recs);
         // Persist the sentiment snapshot of every technical finalist for later
         // validation of the news overlay (best-effort; never blocks the scan).
         if (sentimentSamples.length) {
           insertSentimentHistory(sentimentSamples).catch(() => {});
         }
         // Mark today as scanned even if 0 signals, so auto-scan doesn't re-run.
-        setMeta("last_scan_date", scanDate);
-        if (regime) setMeta("market_regime", JSON.stringify(regime));
+        await setMeta("last_scan_date", scanDate);
+        if (regime) await setMeta("market_regime", JSON.stringify(regime));
 
         send("complete", { scanDate, count: recs.length, regime });
       } catch (err) {

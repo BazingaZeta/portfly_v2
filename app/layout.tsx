@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Nav } from "@/components/Nav";
+import { TickerTape } from "@/components/TickerTape";
 import { I18nProvider } from "@/components/I18nProvider";
 import { RiskProvider } from "@/components/RiskProvider";
 import { getSession } from "@/lib/auth";
@@ -33,17 +34,21 @@ export default async function RootLayout({
       lang="it"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col md:flex-row">
+      <body className="min-h-full flex flex-col">
         {/* Sfondo atmosferico: blob lenti dietro tutto, mai interattivo */}
         <div className="backdrop" aria-hidden="true">
           <span /><span /><span />
         </div>
         <I18nProvider>
           <RiskProvider>
-            {session && <Nav />}
-            <main className={`flex-1 min-w-0 ${session ? "px-4 py-6 md:px-8 md:py-8" : ""}`}>
-              {children}
-            </main>
+            {/* Nastro dati di mercato: pinnato in cima, sopra nav e contenuto. */}
+            {session && <TickerTape />}
+            <div className="flex-1 min-w-0 flex flex-col md:flex-row">
+              {session && <Nav />}
+              <main className={`flex-1 min-w-0 ${session ? "px-4 py-6 md:px-8 md:py-8" : ""}`}>
+                {children}
+              </main>
+            </div>
           </RiskProvider>
         </I18nProvider>
       </body>

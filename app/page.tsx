@@ -6,6 +6,7 @@ import { SignalCard } from "@/components/SignalCard";
 import { CATEGORIES, sectorFor, nameFor, type Category } from "@/lib/universe";
 import { useI18n } from "@/components/I18nProvider";
 import { RiskSettings } from "@/components/RiskSettings";
+import { useMarketStatus, LiveBadge } from "@/components/LivePrice";
 import type { TFunc } from "@/lib/i18n";
 
 type SortKey = "score" | "upside" | "sentiment" | "change" | "ticker";
@@ -41,6 +42,7 @@ export default function Dashboard() {
   const [category, setCategory] = useState<Category>("Tutte");
   const [sortKey, setSortKey] = useState<SortKey>("score");
   const [regime, setRegime] = useState<{ regime: string; label: string } | null>(null);
+  const market = useMarketStatus();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -92,13 +94,14 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [load, refreshPrices]);
 
-  // Auto-refresh live prices every 30s while the page is open.
+  // Auto-refresh live prices every 30s — solo a mercato USA aperto (fuori orario
+  // i prezzi sono fermi: niente chiamate a vuoto né falso "live").
   useEffect(() => {
-    if (recs.length === 0) return;
+    if (recs.length === 0 || !market.open) return;
     const tickers = recs.map((r) => r.ticker);
     const id = setInterval(() => refreshPrices(tickers), 30_000);
     return () => clearInterval(id);
-  }, [recs, refreshPrices]);
+  }, [recs, refreshPrices, market.open]);
 
   function runScan() {
     setScanning(true);
@@ -181,10 +184,14 @@ export default function Dashboard() {
           <p className="text-sm text-[var(--muted)] mt-1">
             {scanDate ? t("dash.lastScan", { date: scanDate }) : t("dash.noScan")}
             {pricesAt && (
-              <span className="ml-2 inline-flex items-center gap-1.5 text-[var(--muted)]">
-                ·
-                <span className="live-dot inline-block size-2 rounded-full bg-[var(--positive)]" />
-                {t("dash.live", { time: pricesAt.toLocaleTimeString() })}
+              <span className="ml-2 inline-flex items-center gap-1.5">
+                <span className="text-[var(--muted)]">·</span>
+                <LiveBadge market={market} />
+                {market.open && (
+                  <span className="text-[var(--muted)] text-xs">
+                    {pricesAt.toLocaleTimeString()}
+                  </span>
+                )}
               </span>
             )}
           </p>

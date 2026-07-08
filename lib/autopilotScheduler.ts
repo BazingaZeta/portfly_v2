@@ -15,7 +15,7 @@ async function safeTick(): Promise<void> {
   try {
     if (!(await getAutoStateRow())) return; // bot not started → nothing to do
     ticking = true;
-    const r = await runTick(false);
+    const r = await runTick("main", false);
     console.log(`[autopilot] tick automatico — ${r.rebalanced ? "RIBILANCIATO" : "nessun ribilancio"}`);
   } catch (e) {
     console.error("[autopilot] tick automatico fallito:", e instanceof Error ? e.message : e);

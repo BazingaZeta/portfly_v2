@@ -1,12 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { money } from "@/lib/format";
 import { useI18n } from "@/components/I18nProvider";
 import { useRisk } from "@/components/RiskProvider";
 import { INDICES } from "@/lib/indices";
 import { LoadingPanel } from "@/components/Loading";
 import { MomentumSellModal } from "@/components/MomentumSellModal";
+import { PortfolioEquityPanel } from "@/components/PortfolioEquityPanel";
+import { useLivePrices, LivePrice, LiveBadge, applyLivePrices } from "@/components/LivePrice";
+import type { MarketStatus } from "@/lib/marketHours";
 
 interface Position {
   indexKey: string;
@@ -42,9 +45,11 @@ interface MomentumTrade {
 function PositionsPanel({
   positions,
   onChanged,
+  market,
 }: {
   positions: Position[];
   onChanged: () => void;
+  market?: MarketStatus;
 }) {
   const [selling, setSelling] = useState<Position | null>(null);
 
@@ -73,8 +78,9 @@ function PositionsPanel({
 
       <section className="mb-6">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-medium text-[var(--muted)] uppercase tracking-wide">
+          <h2 className="text-sm font-medium text-[var(--muted)] uppercase tracking-wide flex items-center gap-2">
             ⚡ Posizioni aperte (Momentum RS)
+            {market && <LiveBadge market={market} />}
           </h2>
           <div className="flex items-center gap-4 text-sm">
             <span className="text-[var(--muted)]">Totale: <span className="font-mono text-[var(--foreground)]">{money(totalValue)}</span></span>
@@ -109,7 +115,10 @@ function PositionsPanel({
                     </td>
                     <td className="px-4 py-3 text-right font-mono">{p.shares}</td>
                     <td className="px-4 py-3 text-right font-mono">{money(p.avgCost)}</td>
-                    <td className="px-4 py-3 text-right font-mono">{p.priceStale && <span title="Quote live non disponibile: mostrato il costo medio" className="text-[var(--warning)] mr-1">⚠</span>}{money(p.currentPrice)}</td>
+                    <td className="px-4 py-3 text-right font-mono">
+                      {p.priceStale && <span title="Quote live non disponibile: mostrato il costo medio" className="text-[var(--warning)] mr-1">⚠</span>}
+                      <LivePrice price={p.currentPrice} format={money} />
+                    </td>
                     <td className="px-4 py-3 text-right">
                       <div className={`font-mono font-semibold ${p.unrealizedPnl >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>
                         {p.unrealizedPnl >= 0 ? "+" : ""}{money(p.unrealizedPnl)}
@@ -840,11 +849,19 @@ export default function PortfolioMomentumPage() {
 
   useEffect(() => {
     // Primo load deferito di un tick: setState sincrono nel corpo dell'effect
-    // causa render a cascata (regola react-hooks).
+    // causa render a cascata (regola react-hooks). Struttura posizioni/trade
+    // ricaricata ogni 30s; i prezzi live arrivano dal polling più frequente.
     const t = setTimeout(loadPortfolio, 0);
     const id = setInterval(loadPortfolio, 30_000);
     return () => { clearTimeout(t); clearInterval(id); };
   }, [loadPortfolio]);
+
+  // Prezzi live ~5s: aggiorna prezzo e P&L delle posizioni senza ricaricare tutto.
+  const { prices: livePrices, market } = useLivePrices(positions.map((p) => p.ticker));
+  const livePositions = useMemo(
+    () => applyLivePrices(positions, livePrices),
+    [positions, livePrices],
+  );
 
   return (
     <div className="max-w-5xl mx-auto">
@@ -855,11 +872,13 @@ export default function PortfolioMomentumPage() {
         </p>
       </header>
 
+      <PortfolioEquityPanel strategy="momentum" />
+
       {!loaded ? (
         <LoadingPanel label="Carico il portafoglio…" />
       ) : (
         <>
-          <PositionsPanel positions={positions} onChanged={loadPortfolio} />
+          <PositionsPanel positions={livePositions} onChanged={loadPortfolio} market={market} />
           <PerformancePanel trades={trades} totalPnl={totalPnl} winRate={winRate} />
           <TradeHistoryPanel trades={trades} />
         </>

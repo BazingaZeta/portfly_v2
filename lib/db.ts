@@ -129,6 +129,41 @@ export async function db(): Promise<Client> {
           ts TEXT PRIMARY KEY,
           equity REAL NOT NULL
         )`,
+        // ─── Autopilot "crypto" track: tabelle parallele, stesso schema di auto_*.
+        // Traccia indipendente (secondo autopilot) — non tocca i dati del main.
+        `CREATE TABLE IF NOT EXISTS crypto_auto_state (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          cash REAL NOT NULL,
+          initial_capital REAL NOT NULL,
+          started_at TEXT NOT NULL,
+          last_run TEXT,
+          last_rebalance_month TEXT
+        )`,
+        `CREATE TABLE IF NOT EXISTS crypto_auto_positions (
+          ticker TEXT PRIMARY KEY,
+          shares REAL NOT NULL,
+          avg_cost REAL NOT NULL
+        )`,
+        `CREATE TABLE IF NOT EXISTS crypto_auto_trades (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ticker TEXT NOT NULL,
+          action TEXT NOT NULL,
+          shares REAL NOT NULL,
+          price REAL NOT NULL,
+          executed_at TEXT NOT NULL,
+          reason TEXT
+        )`,
+        `CREATE TABLE IF NOT EXISTS crypto_auto_log (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts TEXT NOT NULL,
+          run_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          message TEXT NOT NULL
+        )`,
+        `CREATE TABLE IF NOT EXISTS crypto_auto_equity (
+          ts TEXT PRIMARY KEY,
+          equity REAL NOT NULL
+        )`,
         `CREATE TABLE IF NOT EXISTS whitelist (
           email TEXT PRIMARY KEY
         )`,
@@ -416,6 +451,18 @@ export async function createUser(email: string, name: string, passwordHash: stri
 }
 
 // ─── Autopilot ────────────────────────────────────────────────────────────────
+//
+// Due tracce indipendenti ("main" e "crypto") = due autopilot separati. Ogni
+// traccia ha il suo set di tabelle: `auto_*` per main (dati live esistenti),
+// `crypto_auto_*` per crypto. Le funzioni prendono `track` (default "main" →
+// retro-compatibile con tutti i chiamanti esistenti). Il nome tabella deriva da
+// un'unione controllata: nessuna interpolazione da input utente.
+
+export type AutoTrack = "main" | "crypto";
+type AutoBase = "auto_state" | "auto_positions" | "auto_trades" | "auto_log" | "auto_equity";
+function autoTable(track: AutoTrack, base: AutoBase): string {
+  return track === "crypto" ? `crypto_${base}` : base;
+}
 
 export interface AutoState { id: number; cash: number; initial_capital: number; started_at: string; last_run: string | null; last_rebalance_month: string | null; }
 export interface AutoPosition { ticker: string; shares: number; avg_cost: number; }
@@ -423,75 +470,76 @@ export interface AutoTrade { id: number; ticker: string; action: string; shares:
 export interface AutoLog { id: number; ts: string; run_id: string; kind: string; message: string; }
 export interface AutoEquity { ts: string; equity: number; }
 
-export async function getAutoState(): Promise<AutoState | null> {
+export async function getAutoState(track: AutoTrack = "main"): Promise<AutoState | null> {
   const client = await db();
-  const r = await client.execute(`SELECT * FROM auto_state WHERE id=1`);
+  const r = await client.execute(`SELECT * FROM ${autoTable(track, "auto_state")} WHERE id=1`);
   if (!r.rows.length) return null;
   const row = r.rows[0] as Record<string, unknown>;
   return { id: 1, cash: n(row.cash), initial_capital: n(row.initial_capital), started_at: s(row.started_at), last_run: sn(row.last_run), last_rebalance_month: sn(row.last_rebalance_month) };
 }
 
-export async function upsertAutoState(state: Omit<AutoState, "id">): Promise<void> {
+export async function upsertAutoState(state: Omit<AutoState, "id">, track: AutoTrack = "main"): Promise<void> {
   const client = await db();
-  await client.execute({ sql: `INSERT INTO auto_state (id,cash,initial_capital,started_at,last_run,last_rebalance_month) VALUES (1,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET cash=excluded.cash,last_run=excluded.last_run,last_rebalance_month=excluded.last_rebalance_month`, args: [state.cash, state.initial_capital, state.started_at, state.last_run ?? null, state.last_rebalance_month ?? null] });
+  await client.execute({ sql: `INSERT INTO ${autoTable(track, "auto_state")} (id,cash,initial_capital,started_at,last_run,last_rebalance_month) VALUES (1,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET cash=excluded.cash,last_run=excluded.last_run,last_rebalance_month=excluded.last_rebalance_month`, args: [state.cash, state.initial_capital, state.started_at, state.last_run ?? null, state.last_rebalance_month ?? null] });
 }
 
-export async function resetAutoState(): Promise<void> {
+export async function resetAutoState(track: AutoTrack = "main"): Promise<void> {
   const client = await db();
   await client.batch([
-    { sql: `DELETE FROM auto_state` },
-    { sql: `DELETE FROM auto_positions` },
-    { sql: `DELETE FROM auto_trades` },
-    { sql: `DELETE FROM auto_log` },
-    { sql: `DELETE FROM auto_equity` },
+    { sql: `DELETE FROM ${autoTable(track, "auto_state")}` },
+    { sql: `DELETE FROM ${autoTable(track, "auto_positions")}` },
+    { sql: `DELETE FROM ${autoTable(track, "auto_trades")}` },
+    { sql: `DELETE FROM ${autoTable(track, "auto_log")}` },
+    { sql: `DELETE FROM ${autoTable(track, "auto_equity")}` },
   ], "write");
 }
 
-export async function getAutoPositions(): Promise<AutoPosition[]> {
+export async function getAutoPositions(track: AutoTrack = "main"): Promise<AutoPosition[]> {
   const client = await db();
-  const r = await client.execute(`SELECT * FROM auto_positions`);
+  const r = await client.execute(`SELECT * FROM ${autoTable(track, "auto_positions")}`);
   return r.rows.map((row) => { const ro = row as Record<string, unknown>; return { ticker: s(ro.ticker), shares: n(ro.shares), avg_cost: n(ro.avg_cost) }; });
 }
 
-export async function upsertAutoPosition(ticker: string, shares: number, avgCost: number): Promise<void> {
+export async function upsertAutoPosition(ticker: string, shares: number, avgCost: number, track: AutoTrack = "main"): Promise<void> {
   const client = await db();
+  const table = autoTable(track, "auto_positions");
   if (shares <= 0) {
-    await client.execute({ sql: `DELETE FROM auto_positions WHERE ticker=?`, args: [ticker] });
+    await client.execute({ sql: `DELETE FROM ${table} WHERE ticker=?`, args: [ticker] });
   } else {
-    await client.execute({ sql: `INSERT INTO auto_positions (ticker,shares,avg_cost) VALUES (?,?,?) ON CONFLICT(ticker) DO UPDATE SET shares=excluded.shares,avg_cost=excluded.avg_cost`, args: [ticker, shares, avgCost] });
+    await client.execute({ sql: `INSERT INTO ${table} (ticker,shares,avg_cost) VALUES (?,?,?) ON CONFLICT(ticker) DO UPDATE SET shares=excluded.shares,avg_cost=excluded.avg_cost`, args: [ticker, shares, avgCost] });
   }
 }
 
-export async function insertAutoTrade(ticker: string, action: string, shares: number, price: number, reason: string | null): Promise<void> {
+export async function insertAutoTrade(ticker: string, action: string, shares: number, price: number, reason: string | null, track: AutoTrack = "main"): Promise<void> {
   const client = await db();
-  await client.execute({ sql: `INSERT INTO auto_trades (ticker,action,shares,price,executed_at,reason) VALUES (?,?,?,?,?,?)`, args: [ticker, action, shares, price, new Date().toISOString(), reason ?? null] });
+  await client.execute({ sql: `INSERT INTO ${autoTable(track, "auto_trades")} (ticker,action,shares,price,executed_at,reason) VALUES (?,?,?,?,?,?)`, args: [ticker, action, shares, price, new Date().toISOString(), reason ?? null] });
 }
 
-export async function getAutoTrades(limit = 100): Promise<AutoTrade[]> {
+export async function getAutoTrades(limit = 100, track: AutoTrack = "main"): Promise<AutoTrade[]> {
   const client = await db();
-  const r = await client.execute({ sql: `SELECT * FROM auto_trades ORDER BY executed_at DESC LIMIT ?`, args: [limit] });
+  const r = await client.execute({ sql: `SELECT * FROM ${autoTable(track, "auto_trades")} ORDER BY executed_at DESC LIMIT ?`, args: [limit] });
   return r.rows.map((row) => { const ro = row as Record<string, unknown>; return { id: n(ro.id), ticker: s(ro.ticker), action: s(ro.action), shares: n(ro.shares), price: n(ro.price), executed_at: s(ro.executed_at), reason: sn(ro.reason) }; });
 }
 
-export async function insertAutoLog(runId: string, kind: string, message: string): Promise<void> {
+export async function insertAutoLog(runId: string, kind: string, message: string, track: AutoTrack = "main"): Promise<void> {
   const client = await db();
-  await client.execute({ sql: `INSERT INTO auto_log (ts,run_id,kind,message) VALUES (?,?,?,?)`, args: [new Date().toISOString(), runId, kind, message] });
+  await client.execute({ sql: `INSERT INTO ${autoTable(track, "auto_log")} (ts,run_id,kind,message) VALUES (?,?,?,?)`, args: [new Date().toISOString(), runId, kind, message] });
 }
 
-export async function getAutoLog(limit = 200): Promise<AutoLog[]> {
+export async function getAutoLog(limit = 200, track: AutoTrack = "main"): Promise<AutoLog[]> {
   const client = await db();
-  const r = await client.execute({ sql: `SELECT * FROM auto_log ORDER BY ts DESC LIMIT ?`, args: [limit] });
+  const r = await client.execute({ sql: `SELECT * FROM ${autoTable(track, "auto_log")} ORDER BY ts DESC LIMIT ?`, args: [limit] });
   return r.rows.map((row) => { const ro = row as Record<string, unknown>; return { id: n(ro.id), ts: s(ro.ts), run_id: s(ro.run_id), kind: s(ro.kind), message: s(ro.message) }; });
 }
 
-export async function upsertAutoEquity(ts: string, equity: number): Promise<void> {
+export async function upsertAutoEquity(ts: string, equity: number, track: AutoTrack = "main"): Promise<void> {
   const client = await db();
-  await client.execute({ sql: `INSERT INTO auto_equity (ts,equity) VALUES (?,?) ON CONFLICT(ts) DO UPDATE SET equity=excluded.equity`, args: [ts, equity] });
+  await client.execute({ sql: `INSERT INTO ${autoTable(track, "auto_equity")} (ts,equity) VALUES (?,?) ON CONFLICT(ts) DO UPDATE SET equity=excluded.equity`, args: [ts, equity] });
 }
 
-export async function getAutoEquity(limit = 500): Promise<AutoEquity[]> {
+export async function getAutoEquity(limit = 500, track: AutoTrack = "main"): Promise<AutoEquity[]> {
   const client = await db();
-  const r = await client.execute({ sql: `SELECT * FROM auto_equity ORDER BY ts ASC LIMIT ?`, args: [limit] });
+  const r = await client.execute({ sql: `SELECT * FROM ${autoTable(track, "auto_equity")} ORDER BY ts ASC LIMIT ?`, args: [limit] });
   return r.rows.map((row) => { const ro = row as Record<string, unknown>; return { ts: s(ro.ts), equity: n(ro.equity) }; });
 }
 
