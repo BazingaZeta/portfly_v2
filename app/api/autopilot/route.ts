@@ -4,7 +4,7 @@ import {
   runTick, getAutoState, getAutoLog, getAutoTrades, getAutoEquityCurve,
   startAutopilot, resetAutopilot, getAutoStateRow, getAutopilotStrategy,
   getKillSwitch, resumeAutopilot, setMaxDd,
-  type AutopilotStrategy,
+  type AutopilotStrategy, type AutoTrack,
 } from "@/lib/autopilotEngine";
 import { telegramConfigured } from "@/lib/notify";
 import { fetchQuotes, fetchMarketStatus } from "@/lib/marketData";
@@ -18,9 +18,13 @@ export const maxDuration = 120;
 // If nobody (cron or user) has ticked for this long, a page view triggers one.
 const LAZY_TICK_AFTER_MS = 12 * 60 * 60 * 1000;
 
-async function snapshot() {
-  const strategyInfo = await getAutopilotStrategy();
-  const positions = await getAutoPositions();
+function trackOf(v: unknown): AutoTrack {
+  return v === "crypto" ? "crypto" : "main";
+}
+
+async function snapshot(track: AutoTrack) {
+  const strategyInfo = await getAutopilotStrategy(track);
+  const positions = await getAutoPositions(track);
   const quoteList = [
     ...new Set([
       ...(strategyInfo.strategy === "rotation"
@@ -34,11 +38,11 @@ async function snapshot() {
   ];
   const [prices, market] = await Promise.all([fetchQuotes(quoteList), fetchMarketStatus()]);
   const [state, log, trades, equity, kill] = await Promise.all([
-    getAutoState((t) => prices[t] ?? 0),
-    getAutoLog(80),
-    getAutoTrades(40),
-    getAutoEquityCurve(),
-    getKillSwitch(),
+    getAutoState((t) => prices[t] ?? 0, track),
+    getAutoLog(80, track),
+    getAutoTrades(40, track),
+    getAutoEquityCurve(track),
+    getKillSwitch(track),
   ]);
   return {
     state,
@@ -51,8 +55,9 @@ async function snapshot() {
   };
 }
 
-export async function GET() {
-  const row = await getAutoStateRow();
+export async function GET(req: NextRequest) {
+  const track = trackOf(req.nextUrl.searchParams.get("track"));
+  const row = await getAutoStateRow(track);
   if (!row) {
     return NextResponse.json({ state: { running: false }, log: [], trades: [], equity: [] });
   }
@@ -62,23 +67,27 @@ export async function GET() {
   if (Date.now() - lastRun > LAZY_TICK_AFTER_MS) {
     after(async () => {
       try {
-        await runTick(false);
-        console.log("[autopilot] lazy tick eseguito (ultimo run datato)");
+        await runTick(track, false);
+        console.log(`[autopilot:${track}] lazy tick eseguito (ultimo run datato)`);
       } catch (e) {
-        console.error("[autopilot] lazy tick fallito:", e instanceof Error ? e.message : e);
+        console.error(`[autopilot:${track}] lazy tick fallito:`, e instanceof Error ? e.message : e);
       }
     });
   }
-  return NextResponse.json(await snapshot());
+  return NextResponse.json(await snapshot(track));
 }
 
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
   const action = body?.action;
+  const track = trackOf(body?.track);
   let rebalanced = false;
   if (action === "start") {
+    // La traccia crypto è dedicata a crypto_trend; la main sceglie rotation/dual.
     const strategy: AutopilotStrategy =
-      body.strategy === "rotation" ? "rotation" : body.strategy === "crypto_trend" ? "crypto_trend" : "dual_momentum";
+      track === "crypto"
+        ? "crypto_trend"
+        : body.strategy === "rotation" ? "rotation" : "dual_momentum";
     await startAutopilot(
       Number(body.capital) > 0 ? Number(body.capital) : 10000,
       strategy,
@@ -87,22 +96,23 @@ export async function POST(req: NextRequest) {
         : undefined,
       strategy === "crypto_trend"
         ? { assets: body.assets, smaPeriod: Number(body.sma) || undefined, hysteresisPct: Number(body.hysteresis) }
-        : undefined
+        : undefined,
+      track
     );
-    const r = await runTick(true); // immediately invest
+    const r = await runTick(track, true); // immediately invest
     rebalanced = r.rebalanced;
   } else if (action === "run") {
-    const r = await runTick(Boolean(body.force));
+    const r = await runTick(track, Boolean(body.force));
     rebalanced = r.rebalanced;
   } else if (action === "reset") {
-    await resetAutopilot();
+    await resetAutopilot(track);
     return NextResponse.json({ ok: true, reset: true });
   } else if (action === "resume") {
-    await resumeAutopilot();
+    await resumeAutopilot(track);
   } else if (action === "setMaxDd") {
-    await setMaxDd(Number(body.maxDdPct) || 25);
+    await setMaxDd(Number(body.maxDdPct) || 25, track);
   } else {
     return NextResponse.json({ error: "action non valida" }, { status: 400 });
   }
-  return NextResponse.json({ ...(await snapshot()), rebalanced, ranAt: new Date().toISOString() });
+  return NextResponse.json({ ...(await snapshot(track)), rebalanced, ranAt: new Date().toISOString() });
 }

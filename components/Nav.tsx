@@ -30,7 +30,10 @@ const SECTIONS: { titleKey: string; links: { href: string; key: string; icon: st
   },
   {
     titleKey: "nav.secAutomation",
-    links: [{ href: "/autopilot", key: "nav.autopilot", icon: "🤖" }],
+    links: [
+      { href: "/autopilot", key: "nav.autopilot", icon: "🤖" },
+      { href: "/crypto-autopilot", key: "nav.autopilotCrypto", icon: "🦾" },
+    ],
   },
   {
     titleKey: "nav.secInfo",

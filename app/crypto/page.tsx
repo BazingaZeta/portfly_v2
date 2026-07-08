@@ -21,11 +21,6 @@ interface Signal {
   config: { smaPeriod: number; hysteresisPct: number; assets: string[] };
   holdingLabel: string; cashWeight: number; assets: AssetStatus[];
 }
-interface Bt {
-  cagr: number; maxDrawdown: number; benchCagr: number; benchMaxDrawdown: number;
-  years: number;
-  walkForward?: { periods: unknown[]; beatBenchPeriods: number; positivePeriods: number };
-}
 
 function fmtPrice(n: number): string {
   const opts: Intl.NumberFormatOptions =
@@ -38,7 +33,6 @@ export default function CryptoPage() {
   const [prices, setPrices] = useState<Record<string, number>>({});
   const [spark, setSpark] = useState<Record<string, number[]>>({});
   const [signal, setSignal] = useState<Signal | null>(null);
-  const [bt, setBt] = useState<Bt | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(false);
 
@@ -67,11 +61,6 @@ export default function CryptoPage() {
         else setErr(true);
       } catch { setErr(true); }
       setLoading(false);
-      // Backtest più lento: caricato dopo, non blocca la dashboard.
-      try {
-        const btRes = await fetch("/api/crypto/backtest?folds=5", { cache: "no-store" });
-        if (btRes.ok) setBt(await btRes.json());
-      } catch { /* opzionale */ }
     }, 0);
     const id = setInterval(pollPrices, 15_000);
     return () => { clearTimeout(t0); clearInterval(id); };
@@ -117,14 +106,14 @@ export default function CryptoPage() {
         </div>
       )}
 
-      {/* ─── Strategia Crypto Trend ─── */}
-      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 sm:p-5 mb-4">
+      {/* ─── Strategia Crypto Trend: segnale corrente ─── */}
+      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 sm:p-5 mb-8">
         <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
           <div>
             <h2 className="text-lg font-bold">{t("crypto.strategyHeading")}</h2>
             <p className="text-xs text-[var(--muted)] mt-1 max-w-xl">{t("crypto.strategyDesc")}</p>
           </div>
-          <Link href="/autopilot" className="btn-primary text-sm whitespace-nowrap self-start">
+          <Link href="/crypto-autopilot" className="btn-primary text-sm whitespace-nowrap self-start">
             {t("crypto.launchCta")}
           </Link>
         </div>
@@ -174,44 +163,7 @@ export default function CryptoPage() {
         )}
       </div>
 
-      {/* ─── Backtest ─── */}
-      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 sm:p-5 mb-4">
-        <h2 className="text-sm font-medium text-[var(--muted)] uppercase tracking-wide mb-3">{t("crypto.backtestHeading")}</h2>
-        {!bt ? (
-          <div className="grid place-items-center py-6"><div className="spinner" /></div>
-        ) : (
-          <>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <Kpi label={t("crypto.stratCagr")} value={`${bt.cagr >= 0 ? "+" : ""}${bt.cagr}%`} tone={bt.cagr >= 0 ? "pos" : "neg"} />
-              <Kpi label={t("crypto.stratDD")} value={`-${bt.maxDrawdown}%`} tone="neg" />
-              <Kpi label={t("crypto.btcCagr")} value={`${bt.benchCagr >= 0 ? "+" : ""}${bt.benchCagr}%`} accent="var(--muted)" />
-              <Kpi label={t("crypto.btcDD")} value={`-${bt.benchMaxDrawdown}%`} accent="var(--muted)" />
-            </div>
-            {bt.walkForward && (
-              <p className="text-xs text-[var(--muted)] mt-3">
-                {t("crypto.wf", {
-                  beat: String(bt.walkForward.beatBenchPeriods),
-                  pos: String(bt.walkForward.positivePeriods),
-                  n: String(bt.walkForward.periods.length),
-                })} · {bt.years}y
-              </p>
-            )}
-          </>
-        )}
-      </div>
-
-      <p className="text-[11px] leading-relaxed text-[var(--muted)]">{t("crypto.disclaimer")}</p>
-    </div>
-  );
-}
-
-function Kpi({ label, value, tone, accent }: { label: string; value: string; tone?: "pos" | "neg"; accent?: string }) {
-  const color = tone === "pos" ? "var(--positive)" : tone === "neg" ? "var(--negative)" : accent ?? "var(--foreground)";
-  return (
-    <div className="relative overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--background)] p-3">
-      <span className="absolute left-0 top-0 h-full w-1" style={{ background: color }} />
-      <p className="text-[10px] uppercase tracking-wide text-[var(--muted)]">{label}</p>
-      <p className="text-lg font-bold font-mono mt-0.5" style={{ color }}>{value}</p>
+      <p className="text-[11px] leading-relaxed text-[var(--muted)] mt-6">{t("crypto.disclaimer")}</p>
     </div>
   );
 }
