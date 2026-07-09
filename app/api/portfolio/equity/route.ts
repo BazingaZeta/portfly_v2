@@ -129,8 +129,12 @@ export async function GET() {
   // Index Trader = index_trades che NON appartengono alla sezione Momentum.
   const indexOnly = indexTrades.filter((t) => !t.indexKey.startsWith("MOMENTUM_"));
 
-  // Benchmark condiviso: 5 anni di SPY coprono qualsiasi span di questi portafogli.
-  const benchCandles = await fetchCandles("SPY", 5);
+  // Benchmark condiviso (5 anni di SPY) + cambio EURUSD per la vista in EUR:
+  // l'investitore è EUR-based su asset USD, il cambio può dominare il P&L reale.
+  const [benchCandles, fxCandles] = await Promise.all([
+    fetchCandles("SPY", 5),
+    fetchCandles("EURUSD=X", 5).catch(() => []),
+  ]);
 
   const strategies = await Promise.all([
     replayFromTrades("sentiment", "Sentiment Analysis", mainTrades, benchCandles),
@@ -139,5 +143,8 @@ export async function GET() {
     Promise.resolve(curveToSeries("autopilot", "Autopilot", autoCurve, benchCandles)),
   ]);
 
-  return NextResponse.json({ strategies });
+  // Serie FX snella (date+close): la conversione avviene lato client (pura).
+  const eurusd = fxCandles.map((c) => ({ date: c.date, close: c.close }));
+
+  return NextResponse.json({ strategies, eurusd });
 }
