@@ -92,6 +92,19 @@ export async function POST(req: NextRequest) {
     // even after the recommendation is replaced by a later scan.
     const recId = body.recommendationId ? Number(body.recommendationId) : null;
     const rec = recId != null ? await getRecommendationById(recId) : null;
+    // Riancoraggio al PREZZO DI ESECUZIONE: i livelli assoluti dello scan
+    // (stop = scanPrice − 1,5·ATR, target = scanPrice + 2,5·ATR) diventano
+    // stantii se compri a un prezzo diverso da quello dello scan — es. sotto lo
+    // stop → "stop colpito" appena comprato pur essendo in profit. Preserviamo le
+    // DISTANZE percentuali della raccomandazione e le riapplichiamo all'entry reale.
+    let target: number | null = null;
+    let stop: number | null = null;
+    if (rec && rec.price > 0) {
+      const stopPct = (rec.price - rec.stop) / rec.price;     // frazione sotto l'entry
+      const targetPct = (rec.target - rec.price) / rec.price; // frazione sopra l'entry
+      if (stopPct > 0) stop = +(price * (1 - stopPct)).toFixed(2);
+      if (targetPct > 0) target = +(price * (1 + targetPct)).toFixed(2);
+    }
     const trade = await insertTrade({
       recommendationId: recId,
       ticker,
@@ -103,8 +116,8 @@ export async function POST(req: NextRequest) {
       notes: body.notes ?? null,
       closesTradeId: null,
       realizedPnl: null,
-      target: rec?.target ?? null,
-      stop: rec?.stop ?? null,
+      target,
+      stop,
     }, userId);
     return NextResponse.json({ trade });
   }

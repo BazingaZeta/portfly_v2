@@ -419,8 +419,11 @@ function PositionRow({ p, spark, onSell }: { p: Position; spark?: number[]; onSe
 
   const flashCls = flash === "up" ? "flash-up" : flash === "down" ? "flash-down" : "";
   const progress = targetProgress(p);
-  const targetHit = p.target != null && p.currentPrice >= p.target;
-  const stopHit = p.stop != null && p.currentPrice <= p.stop;
+  // Guardia anti falso-positivo: uno stop valido (long) sta SOTTO l'entry e un
+  // target SOPRA. Livelli stantii/invertiti (es. stop ≥ costo medio) non vengono
+  // segnalati come colpiti.
+  const targetHit = p.target != null && p.target > p.avgCost && p.currentPrice >= p.target;
+  const stopHit = p.stop != null && p.stop < p.avgCost && p.currentPrice <= p.stop;
 
   return (
     <tr className="border-t border-[var(--border)]">
