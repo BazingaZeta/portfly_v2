@@ -40,6 +40,89 @@ export interface EquitySeries {
 
 const day = (iso: string) => iso.slice(0, 10);
 
+// ─── Vista EUR ────────────────────────────────────────────────────────────────
+// Tutti gli asset sono quotati in USD ma l'investitore è EUR-based: il cambio
+// può dominare il P&L reale (SPY +10% con EUR +10% = zero in EUR). La curva in
+// EUR è il valore del portafoglio convertito giorno per giorno al cambio as-of.
+
+/** Punto FX minimo: chiusura EURUSD=X del giorno (USD per 1 EUR). */
+export interface FxPoint {
+  date: string;
+  close: number;
+}
+
+/**
+ * Converte una serie di equity USD in EUR con il cambio as-of giornaliero
+ * (carry-forward nei giorni senza barra FX). Pura e testabile.
+ *
+ * - value/bench: divisi per il cambio del giorno (EURUSD = USD per 1 EUR).
+ * - invested: ogni *incremento* (contributo) è convertito al cambio del giorno
+ *   in cui avviene — convertire il cumulato al cambio corrente sbaglierebbe il
+ *   capitale realmente versato in EUR.
+ * - drawdown e summary: ricalcolati sulla curva EUR (il DD in EUR differisce
+ *   da quello USD quando il cambio si muove).
+ */
+export function convertSeriesToEur(series: EquitySeries, fx: FxPoint[]): EquitySeries {
+  if (series.points.length === 0 || fx.length === 0) return { points: [], summary: null };
+  const sortedFx = [...fx].sort((a, b) => a.date.localeCompare(b.date));
+
+  let fi = 0;
+  let rate: number | null = null;
+  const rateAt = (date: string): number => {
+    while (fi < sortedFx.length && sortedFx[fi].date <= date) {
+      if (sortedFx[fi].close > 0) rate = sortedFx[fi].close;
+      fi++;
+    }
+    // Prima della prima barra FX: usa la prima disponibile (meglio di saltare i punti).
+    return rate ?? sortedFx.find((p) => p.close > 0)?.close ?? 1;
+  };
+
+  const points: EquityPoint[] = [];
+  let peak = -Infinity;
+  let maxDd = 0;
+  let investedEur = 0;
+  let prevInvestedUsd = 0;
+  let benchFirstEur: number | null = null;
+  let benchLastEur: number | null = null;
+
+  for (const p of series.points) {
+    const r = rateAt(p.date);
+    const value = p.value / r;
+    investedEur += Math.max(0, p.invested - prevInvestedUsd) / r;
+    prevInvestedUsd = p.invested;
+    const bench = p.bench != null ? p.bench / r : null;
+    if (bench != null) {
+      if (benchFirstEur == null) benchFirstEur = bench;
+      benchLastEur = bench;
+    }
+    peak = Math.max(peak, value);
+    const dd = peak > 0 ? (peak - value) / peak : 0;
+    maxDd = Math.max(maxDd, dd);
+    points.push({
+      date: p.date,
+      value: +value.toFixed(2),
+      invested: +investedEur.toFixed(2),
+      drawdownPct: +(dd * 100).toFixed(2),
+      bench: bench != null ? +bench.toFixed(2) : null,
+    });
+  }
+
+  const current = points[points.length - 1].value;
+  return {
+    points,
+    summary: {
+      startValue: points[0].value,
+      currentValue: current,
+      totalReturnPct: investedEur > 0 ? +(((current - investedEur) / investedEur) * 100).toFixed(2) : 0,
+      maxDrawdownPct: +(maxDd * 100).toFixed(2),
+      benchReturnPct:
+        benchFirstEur != null && benchFirstEur > 0 && benchLastEur != null
+          ? +(((benchLastEur - benchFirstEur) / benchFirstEur) * 100).toFixed(2)
+          : null,
+    },
+  };
+}
+
 /**
  * Lettore "as-of": scorre candele ordinate in modo crescente e, chiamato con
  * date monotòne non decrescenti, restituisce l'ultima chiusura con data <= date

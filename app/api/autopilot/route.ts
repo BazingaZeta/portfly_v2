@@ -7,6 +7,7 @@ import {
   type AutopilotStrategy, type AutoTrack,
 } from "@/lib/autopilotEngine";
 import { telegramConfigured } from "@/lib/notify";
+import { checkAutopilotHeartbeat } from "@/lib/heartbeat";
 import { fetchQuotes, fetchMarketStatus } from "@/lib/marketData";
 import { AUTO_UNIVERSE } from "@/lib/autopilot";
 import { getAutoPositions } from "@/lib/db";
@@ -61,6 +62,8 @@ export async function GET(req: NextRequest) {
   if (!row) {
     return NextResponse.json({ state: { running: false }, log: [], trades: [], equity: [] });
   }
+  // Heartbeat: se un bot avviato è fermo da >36h, notifica (best-effort, post-risposta).
+  after(() => checkAutopilotHeartbeat());
   // Lazy tick: keeps the paper account fresh even without a configured cron.
   // Runs after the response is sent (serverless-safe via `after`).
   const lastRun = row.last_run ? new Date(row.last_run).getTime() : 0;

@@ -130,6 +130,11 @@ export function AutopilotPanel({ track, heading, subtitle }: { track: Track; hea
 
   const st = snap?.state;
   const running = st?.running;
+  // Heartbeat lato UI: bot avviato ma ultimo ciclo più vecchio di 36h → il cron
+  // è probabilmente fermo (stessa soglia di lib/heartbeat).
+  const staleHours =
+    running && st?.lastRun ? (Date.now() - new Date(st.lastRun).getTime()) / 3_600_000 : 0;
+  const heartbeatStale = staleHours > 36;
 
   return (
     <div className="max-w-4xl mx-auto">
@@ -178,6 +183,17 @@ export function AutopilotPanel({ track, heading, subtitle }: { track: Track; hea
       <div className="mb-3 rounded-xl border border-[var(--warning)]/40 bg-[var(--warning)]/8 p-3 text-xs text-[var(--warning)]">
         {t("auto.disclaimer")}
       </div>
+      {heartbeatStale && (
+        <div className="mb-3 rounded-xl border border-[var(--warning)]/50 bg-[var(--warning)]/10 p-3 text-sm text-[var(--warning)] flex flex-wrap items-center justify-between gap-3">
+          <span>
+            ⚠️ <strong>Bot fermo</strong>: nessun ciclo da {Math.round(staleHours)}h (atteso ~24h).
+            Il cron potrebbe non girare — esegui un ciclo ora e controlla CRON_SECRET su Vercel.
+          </span>
+          <button onClick={() => act("run")} disabled={busy} className="btn-primary text-xs px-3 py-1.5 shrink-0">
+            ▶ Esegui ciclo ora
+          </button>
+        </div>
+      )}
       {running && snap?.kill?.paused && (
         <div className="mb-3 rounded-xl border border-[var(--negative)]/50 bg-[var(--negative)]/10 p-3 text-sm text-[var(--negative)] flex flex-wrap items-center justify-between gap-3">
           <span>

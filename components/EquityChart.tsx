@@ -1,8 +1,21 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
-import { money, pct } from "@/lib/format";
+import { pct } from "@/lib/format";
 import type { EquityPoint, EquitySummary } from "@/lib/portfolioEquity";
+
+export type Currency = "USD" | "EUR";
+
+/** Formatter valuta coerente col toggle €/$ del grafico. */
+function moneyIn(currency: Currency): (n: number) => string {
+  const fmt = new Intl.NumberFormat(currency === "EUR" ? "it-IT" : "en-US", {
+    style: "currency",
+    currency,
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  return (n) => fmt.format(n);
+}
 
 // Grafico di andamento riutilizzabile: linea equity + benchmark SPY + baseline
 // capitale investito, con una striscia "underwater" del drawdown sotto e
@@ -28,13 +41,23 @@ export function EquityChart({
   points,
   summary,
   label,
+  currency = "USD",
+  onCurrencyChange,
+  fxDeltaPt = null,
 }: {
   points: EquityPoint[];
   summary: EquitySummary | null;
   label: string;
+  /** Valuta dei punti già passati (la conversione avviene a monte). */
+  currency?: Currency;
+  /** Se presente, mostra il toggle €/$ nell'header. */
+  onCurrencyChange?: (c: Currency) => void;
+  /** Effetto cambio in punti % (rendimento EUR − rendimento USD), solo vista EUR. */
+  fxDeltaPt?: number | null;
 }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hover, setHover] = useState<number | null>(null);
+  const money = moneyIn(currency);
 
   const layout = useMemo(() => {
     if (points.length < 2 || !summary) return null;
@@ -110,12 +133,39 @@ export function EquityChart({
     <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
       {/* KPI */}
       <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2 mb-3">
-        <h3 className="text-sm font-medium text-[var(--muted)] uppercase tracking-wide">
-          📈 Andamento — {label}
-        </h3>
+        <div className="flex items-center gap-3">
+          <h3 className="text-sm font-medium text-[var(--muted)] uppercase tracking-wide">
+            📈 Andamento — {label}
+          </h3>
+          {onCurrencyChange && (
+            <div className="flex rounded-lg border border-[var(--border)] overflow-hidden text-[11px] font-mono">
+              {(["USD", "EUR"] as const).map((c) => (
+                <button
+                  key={c}
+                  onClick={() => onCurrencyChange(c)}
+                  className={`px-2 py-0.5 transition-colors ${
+                    currency === c
+                      ? "bg-[var(--accent)]/15 text-[var(--accent)] font-semibold"
+                      : "text-[var(--muted)] hover:bg-[var(--surface-2)]"
+                  }`}
+                  title={c === "EUR" ? "Vista in euro al cambio storico giornaliero" : "Valuta degli asset"}
+                >
+                  {c === "USD" ? "$" : "€"}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-sm">
           <Kpi label="Valore" value={money(summary.currentValue)} />
           <Kpi label="Rendimento" value={pct(summary.totalReturnPct)} color={returnColor} />
+          {fxDeltaPt != null && (
+            <Kpi
+              label="Effetto cambio"
+              value={`${fxDeltaPt >= 0 ? "+" : ""}${fxDeltaPt}pt`}
+              color={fxDeltaPt >= 0 ? "var(--positive)" : "var(--negative)"}
+            />
+          )}
           <Kpi label="Max drawdown" value={`-${summary.maxDrawdownPct.toFixed(1)}%`} color="var(--negative)" />
           <Kpi
             label="SPY"
