@@ -44,7 +44,11 @@ export function SignalCard({
 
   const [showForm, setShowForm] = useState(false);
   const [shares, setShares] = useState("");
-  const [price, setPrice] = useState(String(rec.price));
+  // Il prezzo di esecuzione parte dall'ULTIMO prezzo di mercato (live, Finnhub via
+  // /api/quotes) e resta editabile. All'apertura del form viene rinfrescato al
+  // prezzo live corrente (se non già modificato dall'utente).
+  const [price, setPrice] = useState(String(currentPrice ?? rec.price));
+  const [priceEdited, setPriceEdited] = useState(false);
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState(false);
@@ -319,7 +323,7 @@ export function SignalCard({
               <input
                 type="number"
                 value={price}
-                onChange={(e) => setPrice(e.target.value)}
+                onChange={(e) => { setPrice(e.target.value); setPriceEdited(true); }}
                 className="w-24 input"
               />
             </Field>
@@ -346,6 +350,8 @@ export function SignalCard({
           <button
             onClick={() => {
               if (size && !shares) setShares(String(size.shares));
+              // Apri il form col prezzo di mercato più fresco (se non già editato).
+              if (!priceEdited && currentPrice != null) setPrice(String(currentPrice));
               setShowForm(true);
             }}
             className="btn-primary"

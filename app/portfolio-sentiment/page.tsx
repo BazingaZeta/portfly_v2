@@ -169,8 +169,10 @@ function PositionsPanel({
               </thead>
               <tbody>
                 {positions.map((p) => {
-                  const stopHit = p.stop != null && p.currentPrice <= p.stop;
-                  const targetHit = p.target != null && p.currentPrice >= p.target;
+                  // Uno stop valido (long) sta sotto il costo medio, un target sopra:
+                  // livelli stantii/invertiti non contano come colpiti.
+                  const stopHit = p.stop != null && p.stop < p.avgCost && p.currentPrice <= p.stop;
+                  const targetHit = p.target != null && p.target > p.avgCost && p.currentPrice >= p.target;
                   return (
                     <tr key={p.ticker} className={`border-b border-[var(--border)] last:border-0 ${stopHit ? "bg-[var(--negative)]/5" : targetHit ? "bg-[var(--positive)]/5" : ""}`}>
                       <td className="px-4 py-3">

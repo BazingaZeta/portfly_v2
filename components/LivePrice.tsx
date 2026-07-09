@@ -192,14 +192,17 @@ export function applyLivePrices<T extends Priceable>(
     const costBasis = p.marketValue - p.unrealizedPnl;
     const marketValue = p.shares * lp;
     const unrealizedPnl = marketValue - costBasis;
+    // Entry medio dal cost basis: uno stop valido (long) sta sotto l'entry, un
+    // target sopra. Livelli stantii/invertiti non contano come colpiti.
+    const entry = p.shares > 0 ? costBasis / p.shares : 0;
     return {
       ...p,
       currentPrice: +lp.toFixed(2),
       marketValue: +marketValue.toFixed(2),
       unrealizedPnl: +unrealizedPnl.toFixed(2),
       unrealizedPnlPct: costBasis ? +((unrealizedPnl / costBasis) * 100).toFixed(2) : 0,
-      stopHit: p.stop != null && lp <= p.stop,
-      targetHit: p.target != null && lp >= p.target,
+      stopHit: p.stop != null && p.stop < entry && lp <= p.stop,
+      targetHit: p.target != null && p.target > entry && lp >= p.target,
       priceStale: false,
     } as T;
   });
