@@ -6,6 +6,7 @@ import { useRisk } from "@/components/RiskProvider";
 import { positionSize } from "@/lib/risk";
 import { INDICES } from "@/lib/indices";
 import { MomentumSellModal } from "@/components/MomentumSellModal";
+import { ChannelChart } from "@/components/ChannelChart";
 import type { RegressionChannel } from "@/lib/regression";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -114,6 +115,26 @@ function ZoneBadge({ zone }: { zone: "lower" | "mid" | "upper" }) {
   };
   const labels: Record<string, string> = { lower: "↓ bassa", mid: "◆ media", upper: "↑ alta" };
   return <span className={`text-xs ${styles[zone]}`}>{labels[zone]}</span>;
+}
+
+/** Stato sintetico del canale sotto il grafico: z (posizione nel canale) + R². */
+function ChannelState({ channel }: { channel: RegressionChannel }) {
+  // z basso = vicino alla banda bassa (punto d'ingresso favorevole nella
+  // strategia), z alto = ipercomprato dentro il canale.
+  const zColor =
+    channel.z <= 0.5 ? "var(--positive)" : channel.z <= 1.5 ? "var(--warning)" : "var(--negative)";
+  const trendColor =
+    channel.trend === "asc" ? "var(--positive)" : channel.trend === "desc" ? "var(--negative)" : "var(--muted)";
+  return (
+    <div className="flex items-center gap-2 text-[10px] font-mono mt-0.5">
+      <span style={{ color: trendColor }}>
+        {channel.trend === "asc" ? "↗" : channel.trend === "desc" ? "↘" : "→"}
+      </span>
+      <span style={{ color: zColor }}>z {channel.z >= 0 ? "+" : ""}{channel.z.toFixed(2)}</span>
+      <span className="text-[var(--muted)]">R² {(channel.r2 * 100).toFixed(0)}%</span>
+      <span className="text-[var(--muted)]">{channel.slopePctPerDay >= 0 ? "+" : ""}{channel.slopePctPerDay.toFixed(2)}%/g</span>
+    </div>
+  );
 }
 
 // ─── Buy Modal ────────────────────────────────────────────────────────────────
@@ -381,33 +402,26 @@ function LeaderCard({
           <RsBadge value={leader.rsScore.rs180d} label="180gg" />
         </div>
 
-        {/* Meta-channel info */}
-        <div className="grid grid-cols-3 gap-2 text-xs text-center">
-          <div className="rounded-lg bg-[var(--surface-2)] p-2">
-            <div className="text-[var(--muted)] mb-0.5">Metatitolo</div>
-            <div className="font-mono font-semibold">{leader.metaValue.toFixed(4)}</div>
+        {/* Canali di regressione: prezzo (40gg, da cui stop/target) e metatitolo
+            (60gg, da cui il segnale). Bande a ±2σ, stato z/R² sotto ogni grafico.
+            NB: ogni canale è fittato sulla propria finestra — le serie passate
+            al grafico devono avere la stessa lunghezza del fit. */}
+        <div className="grid grid-cols-1 gap-2">
+          <div>
+            <div className="text-[10px] text-[var(--muted)] mb-1">Canale prezzo (40gg) — stop/target</div>
+            {leader.priceChannel ? (
+              <>
+                <ChannelChart closes={leader.spark.slice(-leader.priceChannel.n)} channel={leader.priceChannel} height={56} />
+                <ChannelState channel={leader.priceChannel} />
+              </>
+            ) : (
+              <MiniSparkline data={leader.spark} height={36} />
+            )}
           </div>
-          <div className="rounded-lg bg-[var(--surface-2)] p-2">
-            <div className="text-[var(--muted)] mb-0.5">Trend meta</div>
-            <div className={`font-semibold ${leader.metaChannel.trend === "asc" ? "text-[var(--positive)]" : leader.metaChannel.trend === "desc" ? "text-[var(--negative)]" : "text-[var(--muted)]"}`}>
-              {leader.metaChannel.trend === "asc" ? "↗ asc" : leader.metaChannel.trend === "desc" ? "↘ disc" : "→ flat"}
-            </div>
-          </div>
-          <div className="rounded-lg bg-[var(--surface-2)] p-2">
-            <div className="text-[var(--muted)] mb-0.5">R² meta</div>
-            <div className="font-mono font-semibold">{(leader.metaChannel.r2 * 100).toFixed(0)}%</div>
-          </div>
-        </div>
-
-        {/* Sparklines */}
-        <div className="flex gap-3 items-end">
-          <div className="flex-1">
-            <div className="text-[10px] text-[var(--muted)] mb-1">Prezzo (60gg)</div>
-            <MiniSparkline data={leader.spark} height={36} />
-          </div>
-          <div className="flex-1">
-            <div className="text-[10px] text-[var(--muted)] mb-1">Metatitolo vs SPY</div>
-            <MiniSparkline data={leader.metaSpark} height={36} />
+          <div>
+            <div className="text-[10px] text-[var(--muted)] mb-1">Canale metatitolo vs SPY (60gg) — segnale</div>
+            <ChannelChart closes={leader.metaSpark.slice(-leader.metaChannel.n)} channel={leader.metaChannel} height={56} />
+            <ChannelState channel={leader.metaChannel} />
           </div>
         </div>
 
