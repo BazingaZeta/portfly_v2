@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { money } from "@/lib/format";
 import { useRisk } from "@/components/RiskProvider";
 import { positionSize } from "@/lib/risk";
@@ -153,9 +153,30 @@ function BuyModal({
   const { accountSize, riskPct } = useRisk();
   const suggested = positionSize(accountSize, riskPct, leader.entry, leader.stop);
   const [shares, setShares] = useState(String(suggested?.shares ?? 1));
+  // Il prezzo di esecuzione parte dall'ULTIMO prezzo di mercato (live via
+  // /api/quotes → Finnhub), non dalla chiusura giornaliera usata dall'analisi:
+  // comprare alla chiusura stantia faceva risultare un P&L diverso da zero
+  // appena aperta la posizione. Editabile; si congela se l'utente lo modifica.
   const [price, setPrice] = useState(String(leader.entry));
+  const [livePrice, setLivePrice] = useState<number | null>(null);
+  const priceEdited = useRef(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    fetch(`/api/quotes?tickers=${leader.ticker}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        const p = d?.prices?.[leader.ticker];
+        if (alive && typeof p === "number" && p > 0) {
+          setLivePrice(p);
+          if (!priceEdited.current) setPrice(String(p));
+        }
+      })
+      .catch(() => { /* offline: resta la chiusura dell'analisi, editabile */ });
+    return () => { alive = false; };
+  }, [leader.ticker]);
 
   const estCost = Number(shares) * Number(price);
   const estRisk = Number(shares) * (Number(price) - leader.stop);
@@ -167,6 +188,13 @@ function BuyModal({
     setSaving(true);
     setError(null);
     try {
+      // Riancoraggio al prezzo di esecuzione: preserva le distanze % del canale
+      // (stop sotto l'entry, target sopra) rispetto alla chiusura d'analisi, così
+      // comprando a un prezzo diverso la posizione non nasce già "stoppata".
+      const stopPct = leader.entry > 0 ? (leader.entry - leader.stop) / leader.entry : 0;
+      const targetPct = leader.entry > 0 ? (leader.target - leader.entry) / leader.entry : 0;
+      const stop = stopPct > 0 ? +(p * (1 - stopPct)).toFixed(2) : leader.stop;
+      const target = targetPct > 0 ? +(p * (1 + targetPct)).toFixed(2) : leader.target;
       const res = await fetch("/api/momentum/trades", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -177,8 +205,8 @@ function BuyModal({
           name: leader.name,
           shares: s,
           price: p,
-          stop: leader.stop,
-          target: leader.target,
+          stop,
+          target,
         }),
       });
       if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? "Errore"); }
@@ -232,9 +260,14 @@ function BuyModal({
             min="0"
             step="0.01"
             value={price}
-            onChange={(e) => setPrice(e.target.value)}
+            onChange={(e) => { setPrice(e.target.value); priceEdited.current = true; }}
             className="input w-full"
           />
+          <span className="text-[10px] text-[var(--muted)] mt-1 block">
+            {livePrice != null
+              ? `Mercato ora: ${money(livePrice)} (live) · chiusura analisi ${money(leader.entry)}`
+              : `Chiusura analisi: ${money(leader.entry)} — recupero prezzo live…`}
+          </span>
         </label>
 
         <div className="mb-4 rounded-lg bg-[var(--surface-2)] p-3 text-xs space-y-1">

@@ -8,8 +8,10 @@ import { INDICES } from "@/lib/indices";
 import { LoadingPanel } from "@/components/Loading";
 import { MomentumSellModal } from "@/components/MomentumSellModal";
 import { PortfolioEquityPanel } from "@/components/PortfolioEquityPanel";
+import { ChannelChart } from "@/components/ChannelChart";
 import { useLivePrices, LivePrice, LiveBadge, applyLivePrices } from "@/components/LivePrice";
 import type { MarketStatus } from "@/lib/marketHours";
+import type { RegressionChannel } from "@/lib/regression";
 
 interface Position {
   indexKey: string;
@@ -27,6 +29,9 @@ interface Position {
   target: number | null;
   stopHit: boolean;
   targetHit: boolean;
+  buyDate?: string;
+  postBuySpark?: number[];
+  postBuyChannel?: RegressionChannel | null;
 }
 
 interface MomentumTrade {
@@ -100,12 +105,18 @@ function PositionsPanel({
                   <th className="text-right px-4 py-2">Costo medio</th>
                   <th className="text-right px-4 py-2">Prezzo</th>
                   <th className="text-right px-4 py-2">P&L</th>
+                  <th className="text-center px-4 py-2">Trend dal buy</th>
                   <th className="text-right px-4 py-2">Stop → Target</th>
                   <th className="px-4 py-2"></th>
                 </tr>
               </thead>
               <tbody>
-                {positions.map((p) => (
+                {positions.map((p) => {
+                  const ch = p.postBuyChannel;
+                  const trendColor = ch
+                    ? ch.trend === "asc" ? "var(--positive)" : ch.trend === "desc" ? "var(--negative)" : "var(--muted)"
+                    : "var(--muted)";
+                  return (
                   <tr key={p.ticker} className={`border-b border-[var(--border)] last:border-0 ${p.stopHit ? "bg-[var(--negative)]/5" : p.targetHit ? "bg-[var(--positive)]/5" : ""}`}>
                     <td className="px-4 py-3">
                       <div className="font-semibold">{p.ticker}</div>
@@ -127,6 +138,21 @@ function PositionsPanel({
                         {p.unrealizedPnlPct >= 0 ? "+" : ""}{p.unrealizedPnlPct.toFixed(2)}%
                       </div>
                     </td>
+                    <td className="px-4 py-3">
+                      {ch && p.postBuySpark && p.postBuySpark.length >= 10 ? (
+                        <div className="w-[150px] mx-auto" title="Prezzo e canale di regressione (±2σ) dal giorno dell'acquisto">
+                          <ChannelChart closes={p.postBuySpark} channel={ch} width={150} height={46} />
+                          <div className="text-[9px] font-mono mt-0.5 text-center" style={{ color: trendColor }}>
+                            {ch.trend === "asc" ? "↗ trend su" : ch.trend === "desc" ? "↘ trend giù" : "→ laterale"}
+                            <span className="text-[var(--muted)]"> · R² {(ch.r2 * 100).toFixed(0)}%</span>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="text-[10px] text-[var(--muted)] text-center w-[150px] mx-auto">
+                          poche barre dal buy
+                        </div>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-right text-xs font-mono text-[var(--muted)]">
                       {p.stop != null ? money(p.stop) : "—"} → {p.target != null ? money(p.target) : "—"}
                     </td>
@@ -139,7 +165,8 @@ function PositionsPanel({
                       </button>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

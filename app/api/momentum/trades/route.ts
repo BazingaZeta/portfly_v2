@@ -6,7 +6,8 @@ import {
   markIndexTradeClosed,
 } from "@/lib/db";
 import { getSession } from "@/lib/auth";
-import { fetchQuotes } from "@/lib/marketData";
+import { fetchQuotes, fetchCandles } from "@/lib/marketData";
+import { regressionChannel } from "@/lib/regression";
 import type { Action } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -30,7 +31,7 @@ export async function GET() {
     byTicker.set(b.ticker, arr);
   }
 
-  const positions = [...byTicker.entries()].map(([ticker, buys]) => {
+  const basePositions = [...byTicker.entries()].map(([ticker, buys]) => {
     const shares = buys.reduce((s, b) => s + b.shares, 0);
     const costBasis = buys.reduce((s, b) => s + b.shares * b.price, 0);
     const avgCost = costBasis / shares;
@@ -38,6 +39,11 @@ export async function GET() {
     const marketValue = shares * currentPrice;
     const unrealizedPnl = marketValue - costBasis;
     const latest = buys[buys.length - 1];
+    // Data del PRIMO buy aperto: da qui parte il canale post-acquisto.
+    const buyDate = buys.reduce((min, b) => (b.executedAt < min ? b.executedAt : min), buys[0].executedAt);
+    // Stop/target validi (long): stop sotto il costo medio, target sopra.
+    const validStop = latest.stop != null && latest.stop < avgCost ? latest.stop : null;
+    const validTarget = latest.target != null && latest.target > avgCost ? latest.target : null;
     return {
       indexKey: latest.indexKey,
       ticker,
@@ -51,10 +57,30 @@ export async function GET() {
       unrealizedPnlPct: costBasis ? +((unrealizedPnl / costBasis) * 100).toFixed(2) : 0,
       stop: latest.stop,
       target: latest.target,
-      stopHit: latest.stop != null && currentPrice <= latest.stop,
-      targetHit: latest.target != null && currentPrice >= latest.target,
+      stopHit: validStop != null && currentPrice <= validStop,
+      targetHit: validTarget != null && currentPrice >= validTarget,
+      buyDate,
     };
   });
+
+  // Arricchimento: prezzo dal giorno del buy + canale di regressione post-buy
+  // (per capire a colpo d'occhio se il trend DOPO l'acquisto è ancora positivo).
+  const positions = await Promise.all(
+    basePositions.map(async (p) => {
+      const spanYears = (Date.now() - new Date(p.buyDate).getTime()) / (365 * 86_400_000);
+      const years = spanYears <= 1 ? 1 : 2;
+      const candles = await fetchCandles(p.ticker, years).catch(() => []);
+      const buyDay = p.buyDate.slice(0, 10);
+      const closes = candles.filter((c) => c.date >= buyDay).map((c) => +c.close.toFixed(2));
+      // Ultimo punto = prezzo live (se diverso dall'ultima chiusura) → grafico fresco.
+      if (p.currentPrice > 0 && (closes.length === 0 || closes[closes.length - 1] !== p.currentPrice)) {
+        closes.push(p.currentPrice);
+      }
+      // Il canale va fittato ESATTAMENTE sulla serie mostrata (stessa lunghezza).
+      const postBuyChannel = closes.length >= 10 ? regressionChannel(closes, 2) : null;
+      return { ...p, postBuySpark: closes, postBuyChannel };
+    })
+  );
   positions.sort((a, b) => b.marketValue - a.marketValue);
 
   // Performance summary from closed trades
