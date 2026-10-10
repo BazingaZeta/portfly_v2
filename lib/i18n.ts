@@ -304,6 +304,7 @@ const it: Dict = {
   "rel.day": "{n}g fa",
   // momentum RS
   "nav.momentum": "Momentum RS",
+  "nav.worldMomentum": "Momentum World",
   "mom.title": "Momentum RS — Forza Relativa",
   "mom.subtitle": "Calcola il metatitolo (titolo÷SPY) per ogni stock e applica canali di regressione sul rapporto. Compra chi guida il benchmark in trend ascendente, vendi quando il trend si esaurisce.",
   "mom.index": "Indice",
@@ -666,6 +667,7 @@ const en: Dict = {
   "rel.day": "{n}d ago",
   // momentum RS
   "nav.momentum": "Momentum RS",
+  "nav.worldMomentum": "Momentum World",
   "mom.title": "Momentum RS — Relative Strength",
   "mom.subtitle": "Computes the meta-stock (ticker÷SPY) for every constituent and applies regression channels to the ratio. Buy who leads the benchmark in an ascending trend, sell when momentum fades.",
   "mom.index": "Index",

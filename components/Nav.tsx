@@ -14,6 +14,7 @@ const SECTIONS: { titleKey: string; links: { href: string; key: string; icon: st
     links: [
       { href: "/", key: "nav.signals", icon: "📊" },
       { href: "/momentum", key: "nav.momentum", icon: "⚡" },
+      { href: "/world-momentum", key: "nav.worldMomentum", icon: "🌍" },
       // "/index" è un nome speciale: il router client di Next lo normalizza a "/"
       // nella barra URL (contenuto giusto, URL sbagliato). Da qui "index-trader".
       { href: "/index-trader", key: "nav.index", icon: "🎯" },
