@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useI18n } from "@/components/I18nProvider";
 import { LivePrice } from "@/components/LivePrice";
 import { Sparkline } from "@/components/Sparkline";
+import { runFetchJob, useJob } from "@/lib/analysisStore";
 
 const DASHBOARD = ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "BNB-USD", "DOGE-USD"];
 const NAMES: Record<string, string> = {
@@ -31,10 +32,25 @@ function fmtPrice(n: number): string {
 export default function CryptoPage() {
   const { t } = useI18n();
   const [prices, setPrices] = useState<Record<string, number>>({});
-  const [spark, setSpark] = useState<Record<string, number[]>>({});
-  const [signal, setSignal] = useState<Signal | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState(false);
+  // Storico e segnale nello store condiviso: restano quando cambi pagina e si
+  // riaggiornano col pulsante. I prezzi invece sono live e continuano a polling.
+  const job = useJob<{ spark: Record<string, number[]>; signal: Signal | null }>("crypto:dashboard");
+  const spark = job.result?.spark ?? {};
+  const signal = job.result?.signal ?? null;
+  const loading = !job.result && job.status !== "error";
+  const err = job.status === "error" || (job.status === "done" && !signal);
+
+  const refresh = useCallback(() => {
+    runFetchJob("crypto:dashboard", async () => {
+      const [spRes, sigRes] = await Promise.all([
+        fetch(`/api/sparkline?tickers=${DASHBOARD.join(",")}&days=90`, { cache: "no-store" }),
+        fetch("/api/crypto/analyze", { cache: "no-store" }),
+      ]);
+      const sparkData = spRes.ok ? ((await spRes.json()).series ?? {}) as Record<string, number[]> : {};
+      if (!sigRes.ok) throw new Error("Analisi crypto non disponibile");
+      return { spark: sparkData, signal: (await sigRes.json()) as Signal };
+    });
+  }, []);
 
   // Prezzi live 24/7 (nessun gating a orario di mercato: le crypto non chiudono).
   const pollPrices = useCallback(async () => {
@@ -49,28 +65,26 @@ export default function CryptoPage() {
 
   useEffect(() => {
     // Deferito di un tick per evitare render a cascata (pattern del repo).
-    const t0 = setTimeout(async () => {
-      pollPrices();
-      try {
-        const [spRes, sigRes] = await Promise.all([
-          fetch(`/api/sparkline?tickers=${DASHBOARD.join(",")}&days=90`, { cache: "no-store" }),
-          fetch("/api/crypto/analyze", { cache: "no-store" }),
-        ]);
-        if (spRes.ok) setSpark((await spRes.json()).series ?? {});
-        if (sigRes.ok) setSignal(await sigRes.json());
-        else setErr(true);
-      } catch { setErr(true); }
-      setLoading(false);
-    }, 0);
+    const t0 = setTimeout(pollPrices, 0);
     const id = setInterval(pollPrices, 15_000);
     return () => { clearTimeout(t0); clearInterval(id); };
   }, [pollPrices]);
 
+  // L'analisi parte da sola solo se non ce n'è già una in memoria.
+  useEffect(() => {
+    if (job.status === "idle") refresh();
+  }, [job.status, refresh]);
+
   return (
     <div className="max-w-4xl mx-auto">
-      <header className="mb-5">
-        <h1 className="text-3xl font-bold tracking-tight gradient-text">{t("crypto.title")}</h1>
-        <p className="text-sm text-[var(--muted)] mt-1 max-w-2xl">{t("crypto.subtitle")}</p>
+      <header className="mb-5 flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight gradient-text">{t("crypto.title")}</h1>
+          <p className="text-sm text-[var(--muted)] mt-1 max-w-2xl">{t("crypto.subtitle")}</p>
+        </div>
+        <button onClick={refresh} disabled={job.status === "running"} className="btn-ghost text-xs">
+          {job.status === "running" ? "Aggiorno…" : "↻ Aggiorna analisi"}
+        </button>
       </header>
 
       {/* ─── Dashboard maggiori crypto ─── */}

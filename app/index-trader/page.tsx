@@ -11,6 +11,7 @@ import { useLivePrices, LivePrice, LiveBadge, applyLivePrices } from "@/componen
 import type { MarketStatus } from "@/lib/marketHours";
 import { positionSize } from "@/lib/risk";
 import { INDICES } from "@/lib/indices";
+import { runSseJob, useJob, usePersistentState } from "@/lib/analysisStore";
 import type { RegressionChannel } from "@/lib/regression";
 
 interface Leader {
@@ -71,17 +72,21 @@ interface IndexTrade {
 
 export default function IndexTraderPage() {
   const { t } = useI18n();
-  const [indexKey, setIndexKey] = useState("SP500");
-  const [analyzing, setAnalyzing] = useState(false);
-  const [progress, setProgress] = useState<{ current: number; total: number; message: string } | null>(null);
-  const [leaders, setLeaders] = useState<Leader[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Analisi e backtest nello store condiviso: restano quando cambi pagina, e
+  // continuano anche se navighi altrove mentre girano (lib/analysisStore).
+  const [indexKey, setIndexKey] = usePersistentState("index:index", "SP500");
+  const job = useJob<{ leaders: Leader[] }, { current: number; total: number; message: string }>("index:analyze");
+  const analyzing = job.status === "running";
+  const progress = analyzing ? job.progress ?? { current: 0, total: 1, message: "…" } : null;
+  const leaders = job.result?.leaders ?? null;
+  const error = job.status === "error" ? job.error ?? "Analisi fallita" : null;
   const [positions, setPositions] = useState<IndexPosition[]>([]);
   const [trades, setTrades] = useState<IndexTrade[]>([]);
   const { accountSize, riskPct } = useRisk();
-  const [bt, setBt] = useState<IndexBacktest | null>(null);
-  const [btRunning, setBtRunning] = useState(false);
-  const [btProgress, setBtProgress] = useState<string>("");
+  const btJob = useJob<IndexBacktest, { message: string }>("index:backtest");
+  const bt = btJob.status === "running" ? null : btJob.result ?? null;
+  const btRunning = btJob.status === "running";
+  const btProgress = btJob.progress?.message ?? "…";
 
   const loadPositions = useCallback(async () => {
     try {
@@ -109,33 +114,12 @@ export default function IndexTraderPage() {
   );
 
   function analyze() {
-    setAnalyzing(true);
-    setError(null);
-    setLeaders(null);
-    setProgress({ current: 0, total: 1, message: "…" });
-    const es = new EventSource(`/api/index/analyze?index=${indexKey}`);
-    es.addEventListener("progress", (e) => setProgress(JSON.parse((e as MessageEvent).data)));
-    es.addEventListener("complete", (e) => {
-      setLeaders(JSON.parse((e as MessageEvent).data).leaders ?? []);
-      es.close();
-      setAnalyzing(false);
-    });
-    es.addEventListener("error", (e) => {
-      setError((e as MessageEvent).data ? JSON.parse((e as MessageEvent).data).message : "Connessione interrotta");
-      es.close();
-      setAnalyzing(false);
-    });
+    runSseJob("index:analyze", `/api/index/analyze?index=${indexKey}`, { index: indexKey });
   }
 
   function runBt() {
-    setBtRunning(true);
-    setBt(null);
-    setBtProgress("…");
     const qs = `index=${indexKey}&risk=${riskPct}&account=${accountSize}`;
-    const es = new EventSource(`/api/index/backtest?${qs}`);
-    es.addEventListener("progress", (e) => setBtProgress(JSON.parse((e as MessageEvent).data).message));
-    es.addEventListener("complete", (e) => { setBt(JSON.parse((e as MessageEvent).data)); es.close(); setBtRunning(false); });
-    es.addEventListener("error", () => { es.close(); setBtRunning(false); });
+    runSseJob("index:backtest", `/api/index/backtest?${qs}`, { index: indexKey });
   }
 
   const pctDone = progress && progress.total ? (progress.current / progress.total) * 100 : 0;

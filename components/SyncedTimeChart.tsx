@@ -1,0 +1,278 @@
+"use client";
+
+import { useMemo, useRef } from "react";
+import type { ChannelPoint } from "@/lib/worldMomentum";
+
+/** Un periodo di possesso da ombreggiare, con i marcatori di ingresso e uscita. */
+export interface HoldingSpan {
+  from: string;
+  /** null = ancora aperta alla fine dello storico. */
+  to: string | null;
+  returnPct: number | null;
+}
+
+/**
+ * Grafico temporale che condivide ASSE e CURSORE con gli altri grafici della
+ * pagina: tutti ricevono lo stesso `domain` (le date mostrate) e lo stesso
+ * `hoverDate`, e chi viene sorvolato aggiorna la data per tutti. Così una
+ * barra del metatitolo, la stessa barra del prezzo e il segnale di quel giorno
+ * stanno sulla stessa verticale.
+ *
+ * Il canale di regressione, se c'è, viene disegnato solo sulle date su cui è
+ * stato fittato: si vede dove comincia la finestra e cosa resta fuori.
+ */
+export function SyncedTimeChart({
+  domain,
+  series,
+  channel,
+  entryMaxZ,
+  spans,
+  kind,
+  hoverDate,
+  onHover,
+  height = 300,
+}: {
+  domain: string[];
+  series: { date: string; value: number }[];
+  channel?: ChannelPoint[];
+  entryMaxZ?: number;
+  spans?: HoldingSpan[];
+  kind: "price" | "meta";
+  hoverDate: string | null;
+  onHover: (date: string | null) => void;
+  height?: number;
+}) {
+  const svgRef = useRef<SVGSVGElement>(null);
+
+  const W = 900;
+  const H = height;
+  const PAD = { top: 16, right: 16, bottom: 30, left: 74 };
+  const iw = W - PAD.left - PAD.right;
+  const ih = H - PAD.top - PAD.bottom;
+  const n = domain.length;
+
+  const fmt = (v: number) => (kind === "price" ? `$${v.toFixed(2)}` : v.toFixed(5));
+
+  const idx = useMemo(() => new Map(domain.map((d, i) => [d, i])), [domain]);
+  const byDate = useMemo(() => new Map(series.map((p) => [p.date, p.value])), [series]);
+  const chByDate = useMemo(() => new Map((channel ?? []).map((p) => [p.date, p])), [channel]);
+
+  // Solo i punti che cadono nel periodo mostrato.
+  const visible = useMemo(() => series.filter((p) => idx.has(p.date)), [series, idx]);
+  const visibleCh = useMemo(() => (channel ?? []).filter((p) => idx.has(p.date)), [channel, idx]);
+
+  const { min, max } = useMemo(() => {
+    const vals = [
+      ...visible.map((p) => p.value),
+      ...visibleCh.flatMap((p) => [p.upper, p.lower]),
+    ].filter((v) => isFinite(v));
+    if (!vals.length) return { min: 0, max: 1 };
+    const lo = Math.min(...vals);
+    const hi = Math.max(...vals);
+    const pad = (hi - lo) * 0.06 || Math.abs(hi) * 0.01 || 1;
+    return { min: lo - pad, max: hi + pad };
+  }, [visible, visibleCh]);
+
+  if (n < 2 || visible.length < 2) return null;
+
+  const x = (d: string) => PAD.left + ((idx.get(d) ?? 0) / (n - 1)) * iw;
+  const y = (v: number) => PAD.top + ((max - v) / (max - min || 1)) * ih;
+  const ticks = Array.from({ length: 5 }, (_, i) => min + ((max - min) * i) / 4);
+  const xLabels = [domain[0], domain[Math.floor((n - 1) / 2)], domain[n - 1]];
+
+  const line = (pts: { date: string }[], get: (p: never) => number) =>
+    pts.map((p) => `${x(p.date).toFixed(1)},${y(get(p as never)).toFixed(1)}`).join(" ");
+
+  const bandPath = (pts: ChannelPoint[], up: (p: ChannelPoint) => number, lo: (p: ChannelPoint) => number) =>
+    pts.length < 2
+      ? ""
+      : `M ${x(pts[0].date)} ${y(up(pts[0]))} ` +
+        pts.map((p) => `L ${x(p.date)} ${y(up(p))}`).join(" ") +
+        ` L ${x(pts[pts.length - 1].date)} ${y(lo(pts[pts.length - 1]))} ` +
+        [...pts].reverse().map((p) => `L ${x(p.date)} ${y(lo(p))}`).join(" ") +
+        " Z";
+
+  const chColor =
+    visibleCh.length > 1 && visibleCh[visibleCh.length - 1].fit > visibleCh[0].fit
+      ? "var(--positive)"
+      : visibleCh.length > 1 && visibleCh[visibleCh.length - 1].fit < visibleCh[0].fit
+      ? "var(--negative)"
+      : "var(--muted)";
+
+  // Fascia d'ingresso: dalla banda inferiore alla quota z = entryMaxZ.
+  // Le bande sono a ±2σ, quindi 1σ = (upper − fit) / 2.
+  const entryTop = (p: ChannelPoint) => p.fit + (entryMaxZ ?? 0) * ((p.upper - p.fit) / 2);
+
+  // Periodi di possesso ritagliati sul periodo mostrato.
+  const lastDate = domain[n - 1];
+  const visibleSpans = (spans ?? [])
+    .map((s) => {
+      const end = s.to ?? lastDate;
+      if (end < domain[0] || s.from > lastDate) return null;
+      const a = s.from < domain[0] ? domain[0] : s.from;
+      const b = end > lastDate ? lastDate : end;
+      // Le date di ingresso/uscita possono non essere nel dominio (festivi):
+      // si aggancia alla prima data disponibile.
+      const aD = idx.has(a) ? a : domain.find((d) => d >= a);
+      const bD = idx.has(b) ? b : [...domain].reverse().find((d) => d <= b);
+      if (!aD || !bD) return null;
+      return { ...s, aD, bD, entryVisible: s.from >= domain[0], exitVisible: s.to != null && s.to <= lastDate };
+    })
+    .filter((v): v is NonNullable<typeof v> => v !== null);
+
+  function onMove(e: React.MouseEvent<SVGSVGElement>) {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const vx = ((e.clientX - rect.left) / rect.width) * W;
+    const i = Math.round(((vx - PAD.left) / iw) * (n - 1));
+    onHover(i >= 0 && i < n ? domain[i] : null);
+  }
+
+  const hv = hoverDate && idx.has(hoverDate) ? hoverDate : null;
+  const hvValue = hv ? byDate.get(hv) : undefined;
+  const hvCh = hv ? chByDate.get(hv) : undefined;
+  const hvSpan = hv ? visibleSpans.find((s) => hv >= s.aD && hv <= s.bD) : undefined;
+
+  return (
+    <div>
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${W} ${H}`}
+        className="w-full"
+        style={{ height }}
+        onMouseMove={onMove}
+        onMouseLeave={() => onHover(null)}
+        role="img"
+        aria-label={kind === "price" ? "Prezzo nel tempo" : "Metatitolo nel tempo"}
+      >
+        {ticks.map((v) => (
+          <g key={v}>
+            <line x1={PAD.left} x2={W - PAD.right} y1={y(v)} y2={y(v)} stroke="var(--border)" strokeWidth="0.5" />
+            <text x={PAD.left - 8} y={y(v) + 4} textAnchor="end" fontSize="11" fill="var(--muted)" fontFamily="monospace">
+              {fmt(v)}
+            </text>
+          </g>
+        ))}
+
+        {/* periodi di possesso */}
+        {visibleSpans.map((s, k) => (
+          <rect
+            key={`s${k}`}
+            x={x(s.aD)}
+            y={PAD.top}
+            width={Math.max(1.5, x(s.bD) - x(s.aD))}
+            height={ih}
+            fill={s.to == null ? "var(--accent)" : (s.returnPct ?? 0) >= 0 ? "var(--positive)" : "var(--negative)"}
+            opacity={hvSpan === s ? 0.24 : 0.11}
+          />
+        ))}
+
+        {/* canale di regressione, solo sulla sua finestra di fit */}
+        {visibleCh.length > 1 && (
+          <>
+            <line
+              x1={x(visibleCh[0].date)} x2={x(visibleCh[0].date)} y1={PAD.top} y2={H - PAD.bottom}
+              stroke={chColor} strokeWidth="1" strokeDasharray="2 3" opacity="0.6"
+            />
+            <text x={x(visibleCh[0].date) + 4} y={PAD.top + 11} fontSize="10" fill={chColor} opacity="0.85">
+              inizio finestra del canale
+            </text>
+            {entryMaxZ != null && (
+              <path d={bandPath(visibleCh, entryTop, (p) => p.lower)} fill="var(--accent)" opacity="0.10" />
+            )}
+            <path d={bandPath(visibleCh, (p) => p.upper, (p) => p.lower)} fill={chColor} opacity="0.07" />
+            <polyline points={line(visibleCh, (p: ChannelPoint) => p.upper)} fill="none" stroke={chColor} strokeWidth="1.2" strokeDasharray="5 4" opacity="0.65" />
+            <polyline points={line(visibleCh, (p: ChannelPoint) => p.lower)} fill="none" stroke={chColor} strokeWidth="1.2" strokeDasharray="5 4" opacity="0.65" />
+            <polyline points={line(visibleCh, (p: ChannelPoint) => p.fit)} fill="none" stroke={chColor} strokeWidth="1.4" opacity="0.55" />
+          </>
+        )}
+
+        {/* serie */}
+        <polyline
+          points={line(visible, (p: { value: number }) => p.value)}
+          fill="none"
+          stroke="var(--foreground)"
+          strokeWidth="1.7"
+          strokeLinejoin="round"
+        />
+
+        {/* marcatori ▲ acquisto / ▼ vendita */}
+        {visibleSpans.map((s, k) => {
+          const ev = byDate.get(s.aD);
+          const xv = byDate.get(s.bD);
+          return (
+            <g key={`m${k}`}>
+              {s.entryVisible && ev != null && (
+                <polygon
+                  points={`${x(s.aD)},${y(ev) + 7} ${x(s.aD) - 5},${y(ev) + 16} ${x(s.aD) + 5},${y(ev) + 16}`}
+                  fill="var(--positive)"
+                />
+              )}
+              {s.exitVisible && xv != null && (
+                <polygon
+                  points={`${x(s.bD)},${y(xv) - 7} ${x(s.bD) - 5},${y(xv) - 16} ${x(s.bD) + 5},${y(xv) - 16}`}
+                  fill="var(--negative)"
+                />
+              )}
+            </g>
+          );
+        })}
+
+        {xLabels.map((d, k) => (
+          <text
+            key={k}
+            x={x(d)}
+            y={H - 10}
+            textAnchor={k === 0 ? "start" : k === 2 ? "end" : "middle"}
+            fontSize="11"
+            fill="var(--muted)"
+            fontFamily="monospace"
+          >
+            {d}
+          </text>
+        ))}
+
+        {/* cursore condiviso */}
+        {hv && (
+          <g>
+            <line x1={x(hv)} x2={x(hv)} y1={PAD.top} y2={H - PAD.bottom} stroke="var(--accent-2)" strokeWidth="1.2" opacity="0.9" />
+            {hvValue != null && <circle cx={x(hv)} cy={y(hvValue)} r="4" fill="var(--accent-2)" />}
+            {hvCh && <circle cx={x(hv)} cy={y(hvCh.fit)} r="3" fill={chColor} opacity="0.85" />}
+          </g>
+        )}
+      </svg>
+
+      <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs font-mono mt-1 min-h-[20px] px-1">
+        {hv ? (
+          <>
+            <span className="text-[var(--accent-2)]">{hv}</span>
+            {hvValue != null && <span>valore <strong>{fmt(hvValue)}</strong></span>}
+            {hvCh ? (
+              <>
+                <span className="text-[var(--muted)]">retta {fmt(hvCh.fit)}</span>
+                <span className="text-[var(--muted)]">banda {fmt(hvCh.lower)} – {fmt(hvCh.upper)}</span>
+                <span className={hvCh.z > 0 ? "text-[var(--warning)]" : "text-[var(--positive)]"}>z {hvCh.z}</span>
+              </>
+            ) : (
+              channel && <span className="text-[var(--muted)]">fuori dalla finestra del canale</span>
+            )}
+            {spans && (
+              hvSpan ? (
+                <span className={hvSpan.to == null ? "text-[var(--accent)]" : (hvSpan.returnPct ?? 0) >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]"}>
+                  in posizione dal {hvSpan.from}
+                  {hvSpan.returnPct != null ? ` · chiusa a ${hvSpan.returnPct >= 0 ? "+" : ""}${hvSpan.returnPct}%` : " · ancora aperta"}
+                </span>
+              ) : (
+                <span className="text-[var(--muted)]">fuori dal mercato</span>
+              )
+            )}
+          </>
+        ) : (
+          <span className="text-[var(--muted)]">
+            Passa il mouse su uno qualsiasi dei grafici: il cursore si muove su tutti e tre.
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}

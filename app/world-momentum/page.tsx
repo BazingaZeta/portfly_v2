@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import Link from "next/link";
+import { runFetchJob, runSseJob, useJob, usePersistentState } from "@/lib/analysisStore";
 import { ChannelChart } from "@/components/ChannelChart";
 import { LoadingPanel } from "@/components/Loading";
 import { money } from "@/lib/format";
@@ -33,6 +34,7 @@ interface Analysis {
   analyzedAt: string;
   regimeOk: boolean;
   regimeNote: string;
+  exposure?: { pct: number; realizedVol: number | null; note: string };
   leaders: Leader[];
 }
 
@@ -69,7 +71,13 @@ interface BacktestResult {
     worstProfitFactor: number;
     positivePeriods: number;
   };
-  options: { benchmark: string; exitRule: string; maxPositions: number; metaWindow: number };
+  /** La stessa strategia senza protezione dai drawdown, sugli stessi dati. */
+  comparison?: {
+    summary: BacktestResult["summary"];
+    equity: { date: string; equity: number }[];
+    walkForward?: BacktestResult["walkForward"];
+  };
+  options: { benchmark: string; exitRule: string; maxPositions: number; metaWindow: number; volTarget: number };
   tickersTested: number;
 }
 
@@ -86,6 +94,8 @@ interface Params {
   exitRule: string;
   years: number;
   useRegime: boolean;
+  /** Volatility targeting: volatilità annua obiettivo in %, 0 = spento. */
+  volTarget: number;
 }
 
 const DEFAULTS: Params = {
@@ -99,6 +109,18 @@ const DEFAULTS: Params = {
   exitRule: "meta_break",
   years: 5,
   useRegime: true,
+  volTarget: 20,
+};
+
+/** Perché si è chiusa una riga del registro: vedi WorldExitKind nel motore. */
+const OUTCOME_LABELS: Record<string, string> = {
+  channel_break: "rottura metatitolo",
+  trim: "riduzione esposizione (parziale)",
+  stop: "stop",
+  trail: "trailing stop",
+  regime: "regime negativo",
+  time: "time stop",
+  end_of_test: "aperta a fine test",
 };
 
 const EXIT_LABELS: Record<string, string> = {
@@ -119,6 +141,7 @@ function qs(p: Params): string {
     exitRule: p.exitRule,
     years: String(p.years),
     useRegime: String(p.useRegime),
+    volTarget: String(p.volTarget),
   }).toString();
 }
 
@@ -190,6 +213,8 @@ function ParamPanel({
           hint="Quanto in basso nel canale deve stare il prezzo per comprare. 0 = metà bassa." onChange={(v) => set("entryMaxZ", v)} />
         <NumField label="Posizioni max" value={params.maxPositions} min={1} max={15}
           hint="Quante posizioni contemporanee. Meno posizioni = più concentrazione." onChange={(v) => set("maxPositions", v)} />
+        <NumField label="Volatilità obiettivo %" value={params.volTarget} step={5} min={0} max={60}
+          hint="Riduzione del drawdown: quando la volatilità realizzata della strategia supera questo valore, si investe meno in proporzione. 0 = spento (strategia senza protezione)." onChange={(v) => set("volTarget", v)} />
         <label className="flex flex-col gap-1">
           <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">Regola di uscita</span>
           <select className="input" value={params.exitRule} onChange={(e) => set("exitRule", e.target.value)}>
@@ -291,64 +316,27 @@ function LeaderCard({ leader, params }: { leader: Leader; params: Params }) {
  * scansione da 80 titoli — il percorso che l'utente fa più spesso. Dura quanto
  * la scheda del browser: nessun rischio di mostrare dati di ieri.
  */
-const cacheKey = (p: Params) => `world-momentum:analysis:${qs(p)}`;
-
-function readCache(p: Params): Analysis | null {
-  try {
-    const raw = sessionStorage.getItem(cacheKey(p));
-    return raw ? (JSON.parse(raw) as Analysis) : null;
-  } catch {
-    return null; // storage disabilitato o pieno: si rifà l'analisi, pazienza
-  }
-}
-
-function writeCache(p: Params, data: Analysis): void {
-  try {
-    sessionStorage.setItem(cacheKey(p), JSON.stringify(data));
-  } catch {
-    /* best-effort */
-  }
-}
+/**
+ * Analisi e backtest vivono nello store condiviso (lib/analysisStore): restano
+ * a schermo quando cambi pagina e un'analisi lanciata continua anche se navighi
+ * altrove. Si tiene l'ULTIMA analisi eseguita, con i parametri usati: se nel
+ * frattempo li cambi, la pagina lo segnala invece di far sparire i risultati.
+ */
+const ANALYSIS_KEY = "world:analyze";
+const BACKTEST_KEY = "world:backtest";
 
 function AnalysisPanel({ params }: { params: Params }) {
-  const [data, setData] = useState<Analysis | null>(null);
-  const [progress, setProgress] = useState<{ current: number; total: number; message: string } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [running, setRunning] = useState(false);
-  const [filter, setFilter] = useState<"all" | "buy" | "strong">("strong");
-  const esRef = useRef<EventSource | null>(null);
+  const job = useJob<Analysis, { current: number; total: number; message: string }>(ANALYSIS_KEY);
+  const data = job.result ?? null;
+  const progress = job.progress ?? null;
+  const running = job.status === "running";
+  const error = job.status === "error" ? job.error ?? "Analisi fallita" : null;
+  const ranWith = (job.meta?.qs as string | undefined) ?? null;
+  const stale = data != null && ranWith != null && ranWith !== qs(params);
+  const [filter, setFilter] = usePersistentState<"all" | "buy" | "strong">("world:analyze:filter", "strong");
 
   const run = useCallback(() => {
-    esRef.current?.close();
-    setRunning(true);
-    setError(null);
-    setProgress(null);
-    const es = new EventSource(`/api/world/analyze?${qs(params)}`);
-    esRef.current = es;
-    es.addEventListener("progress", (e) => setProgress(JSON.parse((e as MessageEvent).data)));
-    es.addEventListener("complete", (e) => {
-      const result = JSON.parse((e as MessageEvent).data) as Analysis;
-      setData(result);
-      writeCache(params, result);
-      setRunning(false);
-      es.close();
-    });
-    es.addEventListener("error", (e) => {
-      const msg = (e as MessageEvent).data ? JSON.parse((e as MessageEvent).data).message : "Connessione interrotta";
-      setError(msg);
-      setRunning(false);
-      es.close();
-    });
-  }, [params]);
-
-  useEffect(() => () => esRef.current?.close(), []);
-
-  // Al mount (e a ogni cambio di parametri) ripesca l'analisi già fatta per
-  // quegli stessi parametri. Deferito di un tick: setState sincrono nel corpo
-  // dell'effect viola le regole react-hooks strict del repo.
-  useEffect(() => {
-    const t = setTimeout(() => setData(readCache(params)), 0);
-    return () => clearTimeout(t);
+    runSseJob<Analysis>(ANALYSIS_KEY, `/api/world/analyze?${qs(params)}`, { qs: qs(params) });
   }, [params]);
 
   const shown = useMemo(() => {
@@ -387,7 +375,14 @@ function AnalysisPanel({ params }: { params: Params }) {
       )}
 
       {error && (
-        <div className="glass rounded-2xl p-4 text-sm" style={{ color: "var(--negative)" }}>{error}</div>
+        <div className="glass rounded-2xl p-4 text-sm mb-4" style={{ color: "var(--negative)" }}>{error}</div>
+      )}
+
+      {stale && !running && (
+        <div className="glass rounded-2xl p-3 mb-4 text-xs text-[var(--muted)]" style={{ borderLeft: "3px solid var(--warning)" }}>
+          Stai guardando l&apos;analisi fatta con i parametri precedenti. Premi <strong>Analizza</strong> per
+          aggiornarla con quelli nuovi.
+        </div>
       )}
 
       {data && !running && (
@@ -399,6 +394,20 @@ function AnalysisPanel({ params }: { params: Params }) {
             <span>{data.regimeOk ? "✅" : "⚠️"}</span>
             <span className="text-[var(--muted)]">{data.regimeNote}</span>
           </div>
+
+          {data.exposure && (
+            <div
+              className="glass rounded-2xl p-3 mb-4 text-xs flex items-start gap-3 flex-wrap"
+              style={{ borderLeft: `3px solid ${data.exposure.pct >= 100 ? "var(--positive)" : "var(--accent)"}` }}
+            >
+              <span className="font-mono text-base leading-none">{data.exposure.pct}%</span>
+              <span className="text-[var(--muted)] flex-1 min-w-[16rem]">
+                <strong className="text-[var(--foreground)]">Esposizione consigliata oggi.</strong>{" "}
+                {data.exposure.note} È la protezione dai drawdown: decide quanto investire, non
+                cosa comprare.
+              </span>
+            </div>
+          )}
 
           <div className="flex gap-2 mb-4 flex-wrap">
             {([
@@ -433,42 +442,120 @@ function AnalysisPanel({ params }: { params: Params }) {
 
 // ─── Grafici del backtest ────────────────────────────────────────────────────
 
-/** Curva equity (mark-to-market) contro il benchmark. */
+/** Curva equity (mark-to-market) contro il benchmark, e opzionalmente la versione senza protezione. */
 function EquityChart({
-  strategy, bench, base,
+  strategy, bench, base, compare,
 }: {
   strategy: { date: string; equity: number }[];
   bench: { date: string; equity: number }[];
   base: number;
+  compare?: { date: string; equity: number }[];
 }) {
   if (strategy.length < 2) return null;
   const W = 720, H = 220, PAD = { t: 14, r: 14, b: 26, l: 62 };
   const iw = W - PAD.l - PAD.r, ih = H - PAD.t - PAD.b;
-  const all = [...strategy.map((p) => p.equity), ...bench.map((p) => p.equity), base];
+  const all = [...strategy, ...bench, ...(compare ?? [])].map((p) => p.equity).concat(base);
   const min = Math.min(...all) * 0.98, max = Math.max(...all) * 1.02;
   const x = (i: number, n: number) => PAD.l + (i / Math.max(1, n - 1)) * iw;
   const y = (v: number) => PAD.t + ((max - v) / (max - min || 1)) * ih;
   const path = (pts: { equity: number }[]) => pts.map((p, i) => `${x(i, pts.length)},${y(p.equity)}`).join(" ");
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="Curva di equity">
-      {[0, 0.25, 0.5, 0.75, 1].map((f) => {
-        const v = min + (max - min) * f;
-        return (
-          <g key={f}>
+    <div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="Curva di equity">
+        {[0, 0.25, 0.5, 0.75, 1].map((f) => {
+          const v = min + (max - min) * f;
+          return (
+            <g key={f}>
+              <line x1={PAD.l} x2={W - PAD.r} y1={y(v)} y2={y(v)} stroke="var(--border)" strokeWidth="0.5" />
+              <text x={PAD.l - 6} y={y(v) + 3} textAnchor="end" fontSize="9" fill="var(--muted)">
+                {Math.round(v).toLocaleString("it-IT")}
+              </text>
+            </g>
+          );
+        })}
+        <line x1={PAD.l} x2={W - PAD.r} y1={y(base)} y2={y(base)} stroke="var(--muted)" strokeWidth="0.8" strokeDasharray="3 3" opacity="0.5" />
+        <polyline points={path(bench)} fill="none" stroke="var(--muted)" strokeWidth="1.5" strokeDasharray="5 4" />
+        {compare && compare.length > 1 && (
+          <polyline points={path(compare)} fill="none" stroke="var(--warning)" strokeWidth="1.5" opacity="0.75" strokeLinejoin="round" />
+        )}
+        <polyline points={path(strategy)} fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinejoin="round" />
+      </svg>
+      {/* Legenda fuori dal disegno: dentro, finiva sopra i picchi della curva. */}
+      <div className="flex flex-wrap gap-x-5 gap-y-1 text-[11px] mt-2 px-1">
+        <span className="flex items-center gap-1.5"><span className="inline-block w-4 h-0.5 bg-[var(--accent)]" />{compare ? "con protezione dai drawdown" : "strategia"}</span>
+        {compare && <span className="flex items-center gap-1.5"><span className="inline-block w-4 h-0.5 bg-[var(--warning)]" />senza protezione</span>}
+        <span className="flex items-center gap-1.5 text-[var(--muted)]"><span className="inline-block w-4 border-t border-dashed border-[var(--muted)]" />benchmark</span>
+      </div>
+    </div>
+  );
+}
+
+/** Serie di drawdown (%) dal massimo precedente. */
+function drawdownSeries(eq: { date: string; equity: number }[]): { date: string; dd: number }[] {
+  let peak = -Infinity;
+  return eq.map((p) => {
+    peak = Math.max(peak, p.equity);
+    return { date: p.date, dd: peak > 0 ? ((p.equity - peak) / peak) * 100 : 0 };
+  });
+}
+
+/**
+ * Curva "sott'acqua": quanto si è sotto il massimo precedente, giorno per
+ * giorno. È la vista diretta dei picchi che poi cadono — ogni avvallamento è
+ * un drawdown, la profondità è quanto fa male, la larghezza quanto dura.
+ */
+function DrawdownChart({
+  series,
+}: {
+  series: { label: string; color: string; eq: { date: string; equity: number }[] }[];
+}) {
+  const dds = series.map((s) => ({ ...s, dd: drawdownSeries(s.eq) }));
+  const n = Math.max(...dds.map((d) => d.dd.length));
+  if (n < 2) return null;
+  const W = 720, H = 180, PAD = { t: 10, r: 14, b: 22, l: 52 };
+  const iw = W - PAD.l - PAD.r, ih = H - PAD.t - PAD.b;
+  const worst = Math.min(...dds.flatMap((d) => d.dd.map((p) => p.dd)), -1);
+  const lo = Math.floor(worst / 5) * 5;
+  const x = (i: number, len: number) => PAD.l + (i / Math.max(1, len - 1)) * iw;
+  const y = (v: number) => PAD.t + (v / lo) * ih;
+  const ticks = Array.from({ length: Math.round(-lo / 5) + 1 }, (_, i) => -i * 5).filter((v, i, a) => a.length <= 7 || i % 2 === 0);
+
+  return (
+    <div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="Curva di drawdown">
+        {ticks.map((v) => (
+          <g key={v}>
             <line x1={PAD.l} x2={W - PAD.r} y1={y(v)} y2={y(v)} stroke="var(--border)" strokeWidth="0.5" />
-            <text x={PAD.l - 6} y={y(v) + 3} textAnchor="end" fontSize="9" fill="var(--muted)">
-              {Math.round(v).toLocaleString("it-IT")}
-            </text>
+            <text x={PAD.l - 6} y={y(v) + 3} textAnchor="end" fontSize="9" fill="var(--muted)">{v}%</text>
           </g>
-        );
-      })}
-      <line x1={PAD.l} x2={W - PAD.r} y1={y(base)} y2={y(base)} stroke="var(--muted)" strokeWidth="0.8" strokeDasharray="3 3" opacity="0.5" />
-      <polyline points={path(bench)} fill="none" stroke="var(--muted)" strokeWidth="1.5" strokeDasharray="5 4" />
-      <polyline points={path(strategy)} fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinejoin="round" />
-      <text x={W - PAD.r} y={PAD.t + 10} textAnchor="end" fontSize="10" fill="var(--accent)">strategia</text>
-      <text x={W - PAD.r} y={PAD.t + 24} textAnchor="end" fontSize="10" fill="var(--muted)">benchmark</text>
-    </svg>
+        ))}
+        {dds.map((d, k) => (
+          <g key={k}>
+            <path
+              d={`M ${x(0, d.dd.length)} ${y(0)} ` + d.dd.map((p, i) => `L ${x(i, d.dd.length)} ${y(p.dd)}`).join(" ") + ` L ${x(d.dd.length - 1, d.dd.length)} ${y(0)} Z`}
+              fill={d.color}
+              opacity={k === dds.length - 1 ? 0.22 : 0.12}
+            />
+            <polyline
+              points={d.dd.map((p, i) => `${x(i, d.dd.length)},${y(p.dd)}`).join(" ")}
+              fill="none" stroke={d.color} strokeWidth={k === dds.length - 1 ? 1.6 : 1.2}
+            />
+          </g>
+        ))}
+      </svg>
+      <div className="flex flex-wrap gap-x-5 gap-y-1 text-[11px] mt-2 px-1">
+        {dds.map((d) => {
+          const w = Math.min(...d.dd.map((p) => p.dd));
+          return (
+            <span key={d.label} className="flex items-center gap-1.5">
+              <span className="inline-block w-4 h-0.5" style={{ background: d.color }} />
+              {d.label}: peggiore <strong className="font-mono">{w.toFixed(1)}%</strong>
+            </span>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -677,6 +764,7 @@ function TradeLog({
               <th className="pb-2 font-medium text-right">P&amp;L</th>
               <th className="pb-2 font-medium text-right">Rend.</th>
               <th className="pb-2 font-medium text-right">Barre</th>
+              <th className="pb-2 font-medium">Motivo</th>
             </tr>
           </thead>
           <tbody className="font-mono">
@@ -695,6 +783,7 @@ function TradeLog({
                   {t.returnPct >= 0 ? "+" : ""}{t.returnPct}%
                 </td>
                 <td className="py-1.5 text-right text-[var(--muted)]">{t.barsHeld}</td>
+                <td className="py-1.5 text-[var(--muted)] font-sans">{OUTCOME_LABELS[t.outcome] ?? t.outcome}</td>
               </tr>
             ))}
           </tbody>
@@ -707,6 +796,81 @@ function TradeLog({
         </button>
       )}
     </div>
+  );
+}
+
+/**
+ * Confronto fra la strategia con e senza protezione dai drawdown, simulate sugli
+ * stessi dati e la stessa finestra. È la tabella che serve per decidere: quanto
+ * rischio toglie la protezione, e quanto rendimento costa.
+ */
+function ComparisonPanel({ result }: { result: BacktestResult }) {
+  const cmp = result.comparison!;
+  const ulcer = (eq: { equity: number }[]) => {
+    let peak = -Infinity, sum = 0;
+    for (const p of eq) { peak = Math.max(peak, p.equity); const d = ((peak - p.equity) / peak) * 100; sum += d * d; }
+    return Math.sqrt(sum / Math.max(1, eq.length));
+  };
+  const beats = (wf: BacktestResult["walkForward"]) =>
+    wf ? wf.periods.filter((p) => p.summary.totalReturn > (benchReturnBetween(result.benchEquity, p.start, p.end) ?? Infinity)).length : null;
+
+  const nFolds = result.walkForward?.periods.length ?? 5;
+  /** dp = decimali; unit = suffisso della differenza (punti % o niente). */
+  const rows: { label: string; hint: string; a: number | null; b: number | null; dp: number; unit: string; fmt: (v: number) => string; better: "low" | "high" }[] = [
+    { label: "Max drawdown", hint: "La perdita peggiore dal massimo precedente", a: cmp.summary.maxDrawdown, b: result.summary.maxDrawdown, dp: 1, unit: " pt", fmt: (v) => `${v.toFixed(1)}%`, better: "low" },
+    { label: "Ulcer index", hint: "Profondità E durata dei drawdown insieme: più basso = meno sofferenza", a: ulcer(cmp.equity), b: ulcer(result.equity), dp: 1, unit: "", fmt: (v) => v.toFixed(1), better: "low" },
+    { label: "Rendimento totale", hint: "Sull'intera finestra", a: cmp.summary.totalReturn, b: result.summary.totalReturn, dp: 1, unit: " pt", fmt: (v) => `${v.toFixed(1)}%`, better: "high" },
+    { label: "CAGR", hint: "Rendimento annuo composto", a: cmp.summary.cagr, b: result.summary.cagr, dp: 1, unit: " pt", fmt: (v) => `${v.toFixed(1)}%`, better: "high" },
+    { label: "Calmar (CAGR ÷ max DD)", hint: "Rendimento per unità di drawdown: la misura che riassume il compromesso", a: cmp.summary.cagr / Math.max(0.1, cmp.summary.maxDrawdown), b: result.summary.cagr / Math.max(0.1, result.summary.maxDrawdown), dp: 2, unit: "", fmt: (v) => v.toFixed(2), better: "high" },
+    { label: "Profit factor", hint: "Guadagni lordi ÷ perdite lorde", a: cmp.summary.profitFactor, b: result.summary.profitFactor, dp: 2, unit: "", fmt: (v) => v.toFixed(2), better: "high" },
+    { label: "Peggior PF nei periodi", hint: "Il sotto-periodo peggiore del walk-forward", a: cmp.walkForward?.worstProfitFactor ?? null, b: result.walkForward?.worstProfitFactor ?? null, dp: 2, unit: "", fmt: (v) => v.toFixed(2), better: "high" },
+    { label: "Periodi che battono il benchmark", hint: "Su quanti sotto-periodi del walk-forward", a: beats(cmp.walkForward), b: beats(result.walkForward), dp: 0, unit: "", fmt: (v) => `${v}/${nFolds}`, better: "high" },
+  ];
+
+  return (
+    <section>
+      <h3 className="text-sm font-semibold mb-1">Con e senza protezione dai drawdown</h3>
+      <p className="text-xs text-[var(--muted)] mb-2 max-w-3xl">
+        Stessi titoli, stessi segnali, stesse date di ingresso e uscita: cambia solo quanto si
+        investe. Con la volatilità della strategia sopra il {result.options.volTarget}% annuo
+        l&apos;esposizione si riduce in proporzione.
+      </p>
+      <p className="text-[11px] text-[var(--muted)] mb-2 max-w-3xl">
+        I numeri di un singolo backtest cambiano anche molto spostando l&apos;inizio di un giorno,
+        perché cambia quali titoli si comprano all&apos;avvio (soprattutto il peggior PF dei
+        periodi). La riduzione del drawdown invece è stata verificata su tutte e 5 le fasi dello
+        scan, su un periodo mai usato per tarare (2013-2021) e su un altro universo (Nasdaq 100):
+        regge in tutti e 15 i casi.
+      </p>
+      <div className="glass rounded-2xl p-4 overflow-x-auto">
+        <table className="w-full text-xs [&_th]:pr-4 [&_td]:pr-4 [&_th:last-child]:pr-0 [&_td:last-child]:pr-0">
+          <thead>
+            <tr className="text-[var(--muted)] text-left">
+              <th className="pb-2 font-medium">Metrica</th>
+              <th className="pb-2 font-medium text-right">Senza protezione</th>
+              <th className="pb-2 font-medium text-right">Con protezione</th>
+              <th className="pb-2 font-medium text-right">Differenza</th>
+            </tr>
+          </thead>
+          <tbody className="font-mono">
+            {rows.map((r) => {
+              const d = r.a != null && r.b != null ? r.b - r.a : null;
+              const good = d == null || d === 0 ? null : r.better === "low" ? d < 0 : d > 0;
+              return (
+                <tr key={r.label} className="border-t border-[var(--border)]">
+                  <td className="py-1.5 font-sans" title={r.hint}>{r.label}</td>
+                  <td className="py-1.5 text-right text-[var(--muted)]">{r.a != null ? r.fmt(r.a) : "—"}</td>
+                  <td className="py-1.5 text-right font-semibold">{r.b != null ? r.fmt(r.b) : "—"}</td>
+                  <td className={`py-1.5 text-right ${good == null ? "text-[var(--muted)]" : good ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>
+                    {d == null ? "—" : `${d > 0 ? "+" : ""}${d.toFixed(r.dp)}${r.unit}`}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 
@@ -747,23 +911,25 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: "po
 }
 
 function BacktestPanel({ params }: { params: Params }) {
-  const [result, setResult] = useState<BacktestResult | null>(null);
-  const [running, setRunning] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const job = useJob<BacktestResult>(BACKTEST_KEY);
+  const result = job.result ?? null;
+  const running = job.status === "running";
+  const error = job.status === "error" ? job.error ?? "Backtest fallito" : null;
+  const ranWith = (job.meta?.qs as string | undefined) ?? null;
+  const stale = result != null && ranWith != null && ranWith !== qs(params);
 
-  const run = useCallback(async () => {
-    setRunning(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/world/backtest?${qs(params)}`, { cache: "no-store" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Backtest fallito");
-      setResult(data);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Backtest fallito");
-    } finally {
-      setRunning(false);
-    }
+  const run = useCallback(() => {
+    const q = qs(params);
+    runFetchJob<BacktestResult>(
+      BACKTEST_KEY,
+      async () => {
+        const res = await fetch(`/api/world/backtest?${q}`, { cache: "no-store" });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "Backtest fallito");
+        return data as BacktestResult;
+      },
+      { qs: q }
+    );
   }, [params]);
 
   const benchReturn = useMemo(() => {
@@ -784,7 +950,14 @@ function BacktestPanel({ params }: { params: Params }) {
       </div>
 
       {running && <LoadingPanel label="Scarico lo storico e simulo barra per barra…" />}
-      {error && <div className="glass rounded-2xl p-4 text-sm" style={{ color: "var(--negative)" }}>{error}</div>}
+      {error && <div className="glass rounded-2xl p-4 text-sm mb-4" style={{ color: "var(--negative)" }}>{error}</div>}
+
+      {stale && !running && (
+        <div className="glass rounded-2xl p-3 mb-4 text-xs text-[var(--muted)]" style={{ borderLeft: "3px solid var(--warning)" }}>
+          Risultati del backtest con i parametri precedenti. Premi <strong>Avvia backtest</strong> per
+          rifarlo con quelli nuovi.
+        </div>
+      )}
 
       {result && !running && (
         <div className="flex flex-col gap-6">
@@ -812,10 +985,36 @@ function BacktestPanel({ params }: { params: Params }) {
             </div>
           )}
 
+          {result.comparison && (
+            <ComparisonPanel result={result} />
+          )}
+
           <section>
             <h3 className="text-sm font-semibold mb-2">Equity contro benchmark</h3>
             <div className="glass rounded-2xl p-4">
-              <EquityChart strategy={result.equity} bench={result.benchEquity} base={10_000} />
+              <EquityChart
+                strategy={result.equity}
+                bench={result.benchEquity}
+                base={10_000}
+                compare={result.comparison?.equity}
+              />
+            </div>
+          </section>
+
+          <section>
+            <h3 className="text-sm font-semibold mb-1">Drawdown nel tempo</h3>
+            <p className="text-xs text-[var(--muted)] mb-2">
+              Quanto si è sotto il massimo precedente, giorno per giorno: ogni avvallamento è un
+              picco che poi cade. La profondità è quanto fa male, la larghezza quanto dura.
+            </p>
+            <div className="glass rounded-2xl p-4">
+              <DrawdownChart
+                series={[
+                  { label: "benchmark", color: "var(--muted)", eq: result.benchEquity },
+                  ...(result.comparison ? [{ label: "senza protezione", color: "var(--warning)", eq: result.comparison.equity }] : []),
+                  { label: result.comparison ? "con protezione" : "strategia", color: "var(--accent)", eq: result.equity },
+                ]}
+              />
             </div>
           </section>
 
@@ -916,8 +1115,12 @@ function BacktestPanel({ params }: { params: Params }) {
 // ─── Pagina ──────────────────────────────────────────────────────────────────
 
 export default function WorldMomentumPage() {
-  const [tab, setTab] = useState<"analysis" | "backtest">("analysis");
-  const [params, setParams] = useState<Params>(DEFAULTS);
+  // Scheda e parametri sopravvivono al cambio di pagina: devono corrispondere
+  // all'analisi rimasta a schermo. L'unione coi default copre i parametri
+  // aggiunti dopo che un valore era già stato salvato.
+  const [tab, setTab] = usePersistentState<"analysis" | "backtest">("world:tab", "analysis");
+  const [storedParams, setParams] = usePersistentState<Params>("world:params", DEFAULTS);
+  const params = useMemo(() => ({ ...DEFAULTS, ...storedParams }), [storedParams]);
 
   return (
     <div className="flex flex-col gap-5">

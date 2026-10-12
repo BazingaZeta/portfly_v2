@@ -49,6 +49,8 @@ export async function GET(req: NextRequest) {
       entryMaxZ: num(req, "entryMaxZ", 0),
       scanFreq: num(req, "scanFreq", 5),
       useRegime: req.nextUrl.searchParams.get("useRegime") !== "false",
+      // Volatility targeting: 0 lo spegne, per confrontare con la strategia nuda.
+      volTarget: num(req, "volTarget", 20),
       folds: num(req, "folds", 5),
     });
 

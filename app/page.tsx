@@ -8,6 +8,7 @@ import { useI18n } from "@/components/I18nProvider";
 import { RiskSettings } from "@/components/RiskSettings";
 import { useMarketStatus, LiveBadge } from "@/components/LivePrice";
 import type { TFunc } from "@/lib/i18n";
+import { getJob, runSseJob, useJob } from "@/lib/analysisStore";
 
 type SortKey = "score" | "upside" | "sentiment" | "change" | "ticker";
 
@@ -31,13 +32,16 @@ export default function Dashboard() {
   const [recs, setRecs] = useState<Recommendation[]>([]);
   const [scanDate, setScanDate] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [scanning, setScanning] = useState(false);
-  const [progress, setProgress] = useState<Progress | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // La scansione vive nello store condiviso: se cambi pagina mentre gira, al
+  // ritorno ritrovi il progresso invece di una pagina che non ne sa niente — e
+  // soprattutto non ne parte una seconda in parallelo (lib/analysisStore).
+  const scanJob = useJob<{ count: number }, Progress>("sentiment:scan");
+  const scanning = scanJob.status === "running";
+  const progress = scanning ? scanJob.progress ?? { stage: "fetch", current: 0, total: 1, message: "Avvio scan…" } : null;
+  const error = scanJob.status === "error" ? scanJob.error ?? "Scan fallita" : null;
+  const autoScanning = scanning && scanJob.meta?.auto === true;
   const [prices, setPrices] = useState<Record<string, number>>({});
   const [pricesAt, setPricesAt] = useState<Date | null>(null);
-  const [autoScanning, setAutoScanning] = useState(false);
-  const autoStarted = useRef(false);
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<Category>("Tutte");
   const [sortKey, setSortKey] = useState<SortKey>("score");
@@ -81,17 +85,16 @@ export default function Dashboard() {
     const timer = setTimeout(() => {
       load().then((data) => {
         refreshPrices((data.recommendations ?? []).map((x) => x.ticker));
-        // Auto-scan: if today hasn't been scanned yet, run it automatically.
+        // Auto-scan: se oggi non è ancora stata fatta, e non ce n'è già una in
+        // corso o completata in questa sessione (lo store sopravvive alla
+        // navigazione, il componente no).
         const today = new Date().toISOString().slice(0, 10);
-        if (!autoStarted.current && data.lastScanAttempt !== today) {
-          autoStarted.current = true;
-          setAutoScanning(true);
-          runScan();
+        if (getJob("sentiment:scan").status === "idle" && data.lastScanAttempt !== today) {
+          runScan(true);
         }
       });
     }, 0);
     return () => clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [load, refreshPrices]);
 
   // Auto-refresh live prices every 30s — solo a mercato USA aperto (fuori orario
@@ -103,38 +106,21 @@ export default function Dashboard() {
     return () => clearInterval(id);
   }, [recs, refreshPrices, market.open]);
 
-  function runScan() {
-    setScanning(true);
-    setError(null);
-    setProgress({ stage: "fetch", current: 0, total: 1, message: "Avvio scan…" });
-
-    const es = new EventSource("/api/scan");
-    es.addEventListener("progress", (e) => {
-      setProgress(JSON.parse((e as MessageEvent).data));
-    });
-    es.addEventListener("complete", (e) => {
-      const data = JSON.parse((e as MessageEvent).data);
-      setProgress({
-        stage: "done",
-        current: 1,
-        total: 1,
-        message: `Completata: ${data.count} segnali`,
-      });
-      es.close();
-      setScanning(false);
-      setAutoScanning(false);
-      load().then((d) => refreshPrices((d.recommendations ?? []).map((x) => x.ticker)));
-    });
-    es.addEventListener("error", (e) => {
-      const msg = (e as MessageEvent).data
-        ? JSON.parse((e as MessageEvent).data).message
-        : "Connessione interrotta";
-      setError(msg);
-      setAutoScanning(false);
-      es.close();
-      setScanning(false);
-    });
+  function runScan(auto = false) {
+    runSseJob("sentiment:scan", "/api/scan", { auto });
   }
+
+  // A scansione completata si ricaricano i segnali dal database — anche se è
+  // finita mentre eri su un'altra pagina.
+  const loadedScanAt = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (scanJob.status !== "done" || scanJob.finishedAt === loadedScanAt.current) return;
+    loadedScanAt.current = scanJob.finishedAt;
+    const timer = setTimeout(() => {
+      load().then((d) => refreshPrices((d.recommendations ?? []).map((x) => x.ticker)));
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [scanJob.status, scanJob.finishedAt, load, refreshPrices]);
 
   const pctDone = progress && progress.total ? (progress.current / progress.total) * 100 : 0;
 
@@ -196,7 +182,7 @@ export default function Dashboard() {
             )}
           </p>
         </div>
-        <button onClick={runScan} disabled={scanning} className="btn-primary whitespace-nowrap">
+        <button onClick={() => runScan()} disabled={scanning} className="btn-primary whitespace-nowrap">
           {scanning ? t("dash.scanning") : t("dash.scanBtn")}
         </button>
       </header>

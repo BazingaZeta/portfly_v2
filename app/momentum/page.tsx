@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { money } from "@/lib/format";
+import { runSseJob, useJob, usePersistentState } from "@/lib/analysisStore";
 import { useRisk } from "@/components/RiskProvider";
 import { positionSize } from "@/lib/risk";
 import { INDICES } from "@/lib/indices";
@@ -508,12 +509,16 @@ function LeaderCard({
 // ─── Page ───────────────────────────────────────────────────────────────────────
 
 export default function MomentumPage() {
-  const [indexKey, setIndexKey] = useState("SP500");
-  const [analyzing, setAnalyzing] = useState(false);
-  const [progress, setProgress] = useState<{ current: number; total: number; message: string } | null>(null);
-  const [leaders, setLeaders] = useState<MomentumLeader[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<"all" | "BUY" | "WAIT" | "AVOID" | "HELD">("all");
+  // Analisi, indice e filtro nello store condiviso: restano quando cambi pagina,
+  // e un'analisi in corso continua anche se navighi altrove (lib/analysisStore).
+  const [indexKey, setIndexKey] = usePersistentState("momentum:index", "SP500");
+  const job = useJob<{ leaders: MomentumLeader[] }, { current: number; total: number; message: string }>("momentum:analyze");
+  const analyzing = job.status === "running";
+  const progress = analyzing ? job.progress ?? { current: 0, total: 1, message: "Connessione…" } : null;
+  const leaders = job.result?.leaders ?? null;
+  const error = job.status === "error" ? job.error ?? "Analisi fallita" : null;
+  const analyzedIndex = (job.meta?.index as string | undefined) ?? null;
+  const [filter, setFilter] = usePersistentState<"all" | "BUY" | "WAIT" | "AVOID" | "HELD">("momentum:filter", "all");
   const [heldBy, setHeldBy] = useState<Record<string, HeldPosition>>({});
 
   // Posizioni Momentum aperte: servono per trasformare le card dei titoli già
@@ -539,25 +544,7 @@ export default function MomentumPage() {
   }, [loadPositions]);
 
   function analyze() {
-    setAnalyzing(true);
-    setError(null);
-    setLeaders(null);
-    setProgress({ current: 0, total: 1, message: "Connessione…" });
-
-    const es = new EventSource(`/api/momentum/analyze?index=${indexKey}`);
-    es.addEventListener("progress", (e) => setProgress(JSON.parse((e as MessageEvent).data)));
-    es.addEventListener("complete", (e) => {
-      const data = JSON.parse((e as MessageEvent).data);
-      setLeaders(data.leaders ?? []);
-      es.close();
-      setAnalyzing(false);
-      setProgress(null);
-    });
-    es.addEventListener("error", (e) => {
-      setError((e as MessageEvent).data ? JSON.parse((e as MessageEvent).data).message : "Connessione interrotta");
-      es.close();
-      setAnalyzing(false);
-    });
+    runSseJob("momentum:analyze", `/api/momentum/analyze?index=${indexKey}`, { index: indexKey });
   }
 
   const pctDone = progress && progress.total ? (progress.current / progress.total) * 100 : 0;
@@ -657,6 +644,14 @@ export default function MomentumPage() {
             Scegli un indice e premi Analizza. Il sistema calcola il rapporto stock/SPY per ogni titolo,
             applica canali di regressione sul metatitolo e li classifica per forza relativa composita.
           </p>
+        </div>
+      )}
+
+      {/* Analisi rimasta da un altro indice: si dice, non si nasconde */}
+      {leaders && !analyzing && analyzedIndex && analyzedIndex !== indexKey && (
+        <div className="mb-4 rounded-xl border border-[var(--warning)]/50 bg-[var(--warning)]/10 p-3 text-xs text-[var(--muted)]">
+          Stai guardando l&apos;analisi di <strong>{INDICES.find((i) => i.key === analyzedIndex)?.label ?? analyzedIndex}</strong>.
+          Premi <strong>Analizza</strong> per quella dell&apos;indice selezionato.
         </div>
       )}
 
