@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect } from "react";
 import { money } from "@/lib/format";
+import { runFetchJob, useJob, usePersistentState } from "@/lib/analysisStore";
 
 // ─── Types (mirror /api/rotation payloads) ────────────────────────────────────
 
@@ -139,71 +140,51 @@ function EquityChart({
   );
 }
 
+async function getJson<T>(url: string): Promise<T> {
+  const res = await fetch(url, { cache: "no-store" });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? "Errore");
+  return data as T;
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function RotationPage() {
-  const [bull, setBull] = useState("SSO");
-  const [def, setDef] = useState("BIL");
-  const [sma, setSma] = useState("200");
-  const [hyst, setHyst] = useState("2");
+  // Parametri, segnale e backtest nello store condiviso: restano quando cambi
+  // pagina, e il backtest (che sul deep storico è lungo) continua anche se
+  // navighi altrove mentre gira (lib/analysisStore).
+  const [bull, setBull] = usePersistentState("rotation:bull", "SSO");
+  const [def, setDef] = usePersistentState("rotation:def", "BIL");
+  const [sma, setSma] = usePersistentState("rotation:sma", "200");
+  const [hyst, setHyst] = usePersistentState("rotation:hyst", "2");
 
-  const [status, setStatus] = useState<RotationStatus | null>(null);
-  const [statusErr, setStatusErr] = useState<string | null>(null);
-  const [loadingStatus, setLoadingStatus] = useState(true); // caricamento iniziale on-mount
+  const statusJob = useJob<RotationStatus>("rotation:status");
+  const status = statusJob.result ?? null;
+  const statusErr = statusJob.status === "error" ? statusJob.error ?? "Errore" : null;
+  const loadingStatus = statusJob.status === "running" || (statusJob.status === "idle" && !status);
 
-  const [years, setYears] = useState("33");
-  const [folds, setFolds] = useState("6");
-  const [account, setAccount] = useState("10000");
-  const [bt, setBt] = useState<BtResult | null>(null);
-  const [btErr, setBtErr] = useState<string | null>(null);
-  const [running, setRunning] = useState(false);
+  const [years, setYears] = usePersistentState("rotation:years", "33");
+  const [folds, setFolds] = usePersistentState("rotation:folds", "6");
+  const [account, setAccount] = usePersistentState("rotation:account", "10000");
+  const btJob = useJob<BtResult>("rotation:backtest");
+  const bt = btJob.status === "running" ? null : btJob.result ?? null;
+  const btErr = btJob.status === "error" ? btJob.error ?? "Errore" : null;
+  const running = btJob.status === "running";
 
-  // Nessun setState sincrono qui dentro: lo spinner viene acceso dal chiamante
-  // (stato iniziale true per il mount, onClick per gli aggiornamenti manuali).
-  const loadStatus = useCallback(async (b: string, d: string, s: string, h: string) => {
-    try {
-      const res = await fetch(`/api/rotation/analyze?bull=${b}&def=${d}&sma=${s}&hyst=${h}`, { cache: "no-store" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Errore");
-      setStatus(data);
-      setStatusErr(null);
-    } catch (e) {
-      setStatusErr(e instanceof Error ? e.message : "Errore");
-    } finally {
-      setLoadingStatus(false);
-    }
+  const loadStatus = useCallback((b: string, d: string, s: string, h: string) => {
+    runFetchJob("rotation:status", () => getJson<RotationStatus>(`/api/rotation/analyze?bull=${b}&def=${d}&sma=${s}&hyst=${h}`));
   }, []);
 
-  // Caricamento iniziale: setState solo dentro le callback della promise
-  // (la regola react-hooks vieta chiamate sincrone a funzioni con setState).
+  // Il segnale si carica da solo solo la prima volta: dopo resta in memoria e
+  // si aggiorna col pulsante.
   useEffect(() => {
-    fetch(`/api/rotation/analyze?bull=SSO&def=BIL&sma=200&hyst=2`, { cache: "no-store" })
-      .then(async (res) => {
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error ?? "Errore");
-        setStatus(data);
-        setStatusErr(null);
-      })
-      .catch((e) => setStatusErr(e instanceof Error ? e.message : "Errore"))
-      .finally(() => setLoadingStatus(false));
-  }, []);
+    if (statusJob.status === "idle") loadStatus(bull, def, sma, hyst);
+  }, [statusJob.status, loadStatus, bull, def, sma, hyst]);
 
-  async function runBacktest() {
-    setRunning(true);
-    setBtErr(null);
-    setBt(null);
-    try {
-      const deep = Number(years) > 5 ? "1" : "0";
-      const qs = `bull=${bull}&def=${def}&sma=${sma}&hyst=${hyst}&years=${years}&deep=${deep}&folds=${folds}&account=${account}`;
-      const res = await fetch(`/api/rotation/backtest?${qs}`, { cache: "no-store" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Errore");
-      setBt(data);
-    } catch (e) {
-      setBtErr(e instanceof Error ? e.message : "Errore");
-    } finally {
-      setRunning(false);
-    }
+  function runBacktest() {
+    const deep = Number(years) > 5 ? "1" : "0";
+    const qs = `bull=${bull}&def=${def}&sma=${sma}&hyst=${hyst}&years=${years}&deep=${deep}&folds=${folds}&account=${account}`;
+    runFetchJob("rotation:backtest", () => getJson<BtResult>(`/api/rotation/backtest?${qs}`));
   }
 
   const isBull = status?.regime === "bull";
@@ -253,7 +234,7 @@ export default function RotationPage() {
           </select>
         </label>
         <button
-          onClick={() => { setLoadingStatus(true); loadStatus(bull, def, sma, hyst); }}
+          onClick={() => loadStatus(bull, def, sma, hyst)}
           disabled={loadingStatus}
           className="btn-primary"
         >

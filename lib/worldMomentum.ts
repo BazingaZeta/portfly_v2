@@ -71,11 +71,74 @@
  * Limiti: una sola finestra da 5 anni, in larga parte toro; universo con
  * survivorship bias (lista di oggi testata sul passato). I numeri sopra sono
  * indicativi, mai promessi come attesi live.
+ *
+ * ─── Riduzione del drawdown (ott 2026) ───────────────────────────────────────
+ *
+ * Diagnosi sulla baseline (2021-10 → 2026-10, maxDD 31,2%): due cause.
+ *  1. Picchi restituiti: l'uscita sul metatitolo è lenta, e quando il canale si
+ *     rompe metà del picco è andata (PLTR +343% → chiuso +200%, MU +152% →
+ *     +72%). Senza ribilanciamento un vincitore arriva a pesare un terzo del
+ *     portafoglio, e la sua discesa diventa il drawdown di tutti.
+ *  2. Rischio di mercato: aprile 2025, bear 2022, semiconduttori tutti insieme.
+ *
+ * Tre griglie dichiarate in anticipo, poi la prova fuori campione:
+ *
+ *   meccanismo                   maxDD   rend.   Calmar   esito
+ *   baseline                     31,2%   148,7%  0,64
+ *   stop iniziale (migliore 8%)  26,8%   112,5%  0,61     peggiora il Calmar
+ *   trailing (migliore 15%)      26,6%   116,6%  0,63     batte URTH solo 2/5
+ *   uscita di regime (+isteresi) 23,2%   143,1%  0,84     un fold PF 0,39
+ *   tetto peso 25% + corr < 0,7  25,5%   203,3%  0,98     NON regge fuori campione
+ *   volTarget 20%                21,7%   150,3%  0,93     ADOTTATO
+ *
+ * Gli stop sul prezzo tagliano la coda destra di cui la strategia vive (la v3
+ * aveva già misurato lo stesso). Il filtro di correlazione sembrava il migliore
+ * nel campione, ma su dati mai visti rende MENO della baseline (2013-21: 517%
+ * contro 567%; NDX: 166% contro 186%): fortuna di percorso, scartato.
+ *
+ * Il volatility targeting (Barroso & Santa-Clara 2015, "Momentum has its
+ * moments": prior di letteratura indipendente da questi dati) taglia il
+ * drawdown in tutti e tre i test, incluso il periodo che non avevo mai guardato:
+ *
+ *                       2021-26 SP500     2013-21 SP500     2021-26 NDX
+ *   maxDD  baseline         31,2%             38,2%             30,8%
+ *   maxDD  volTarget 20     21,7%             25,9%             23,9%
+ *   Calmar baseline         0,64              0,65              0,76
+ *   Calmar volTarget 20     0,93              0,86              1,04
+ *
+ * Plateau: volTarget 15/20/25 e volWindow 21/42/63 migliorano tutti il Calmar
+ * in tutti e tre i test; minExposure non scatta mai. Costo onesto: nel lungo
+ * toro 2013-21 il rendimento scende da 567% a 463% — è il prezzo del rischio
+ * tolto, la strategia batte comunque URTH (+154%) di tre volte.
+ *
+ * ATTENZIONE — FASE DELLO SCAN. Lo scan avviene ogni 5 barre: spostare l'inizio
+ * del backtest di UN giorno cambia quali giorni sono di scan e quali titoli si
+ * comprano all'avvio. Sul 2021-26 il primo fold (bear 2022, ~19 trade) passa da
+ * PF 1,18 a 0,22 spostando l'inizio dall'11 al 12 ottobre. Per questo la
+ * validazione finale è ripetuta su tutte e 5 le fasi (mediana [min – max]):
+ *
+ *                     2021-26 SP500       2013-21 SP500       2021-26 NDX
+ *   maxDD senza       28,7 [26,0–31,2]    38,8 [36,0–41,1]    33,0 [29,4–34,4]
+ *   maxDD con         20,0 [16,4–21,7]    25,9 [24,6–27,2]    24,3 [21,3–27,0]
+ *   Calmar senza      0,71                0,64                0,54
+ *   Calmar con        0,93                0,86                0,99
+ *   peggior PF senza  0,96 [0,15–1,06]    1,69                0,28 [0,09–0,65]
+ *   peggior PF con    0,97 [0,22–1,18]    1,67                0,33 [0,11–0,71]
+ *
+ * La riduzione del drawdown regge in 15 casi su 15. Il peggior PF per fold
+ * invece è instabile e dipende dalla fase: è una fragilità della strategia di
+ * base (sul NDX non passa il gate della skill in nessuna variante), che la
+ * protezione non peggiora e non risolve. Va trattata a parte — una pista è lo
+ * scan giornaliero, che va validato prima di adottarlo.
+ *
+ * Non cambia QUALI titoli si comprano né QUANDO: stessi 160 round-trip della
+ * baseline. Cambia solo quanto si investe. Le opzioni scartate restano nel
+ * motore, spente, perché il risultato sia riproducibile.
  */
 
 import type { Candle } from "./types";
 import { indexByKey } from "./indices";
-import { nameFor } from "./universe";
+import { nameFor, sectorFor } from "./universe";
 import { fetchCandles } from "./marketData";
 import { regressionChannel, type RegressionChannel } from "./regression";
 import type { BacktestSummary, WalkForwardPeriod, WalkForwardReport } from "./backtest";
@@ -136,6 +199,41 @@ export interface WorldMomentumOptions {
   scanFreq?: number;
   /** Time-stop di sicurezza, in barre (0 = nessuno). */
   maxHoldBars?: number;
+  // ── Gestione del rischio (0 = disattivo). Vedi `initialStop` e `trailStop`.
+  /** Stop iniziale a k × ATR(14) sotto il prezzo d'ingresso. */
+  stopAtr?: number;
+  /** Stop iniziale a una % fissa sotto il prezzo d'ingresso. */
+  stopPct?: number;
+  /** Trailing: k × ATR(14) corrente sotto il massimo dall'ingresso. */
+  trailAtr?: number;
+  /** Trailing: % fissa sotto il massimo dall'ingresso. */
+  trailPct?: number;
+  /** Tetto al peso di una posizione sul capitale a mercato: l'eccesso si vende. */
+  maxWeight?: number;
+  /** "equal" = stesso capitale per slot; "invvol" = slot scalato su 1/volatilità. */
+  sizing?: "equal" | "invvol";
+  /** Con il regime negativo chiude anche le posizioni aperte, non solo le entrate. */
+  regimeExit?: boolean;
+  /**
+   * Banda anti-whipsaw attorno alla SMA di regime (%): il regime diventa
+   * negativo sotto SMA×(1−h) e torna positivo sopra SMA×(1+h). Stessa logica
+   * già validata nella Rotazione a leva.
+   */
+  regimeHysteresisPct?: number;
+  /** Non aprire un titolo con correlazione (60 barre) sopra questa soglia con uno già in portafoglio. */
+  maxCorr?: number;
+  /** Massimo numero di posizioni contemporanee nello stesso settore. */
+  maxPerSector?: number;
+  /**
+   * Volatility targeting (Barroso & Santa-Clara 2015): volatilità annua
+   * obiettivo della strategia, in %. Quando la volatilità realizzata la
+   * supera, l'esposizione si riduce in proporzione. 0 = disattivo.
+   */
+  volTarget?: number;
+  /** Barre di equity su cui si misura la volatilità realizzata. */
+  volWindow?: number;
+  /** Esposizione minima: anche nel panico non si scende sotto questa quota investita. */
+  minExposure?: number;
   folds?: number;
   w30?: number;
   w90?: number;
@@ -143,6 +241,17 @@ export interface WorldMomentumOptions {
 }
 
 export type ResolvedWorldOptions = Required<WorldMomentumOptions>;
+
+/**
+ * Perché si è chiusa (in tutto o in parte) una posizione:
+ *  - channel_break: la regola di uscita della strategia (default: metatitolo)
+ *  - stop / trail:  lo stop sul prezzo, iniziale o trascinato dal massimo
+ *  - trim:          vendita parziale per riportare il peso sotto `maxWeight`
+ *  - regime:        uscita forzata col benchmark sotto la SMA di regime
+ *  - time / end_of_test: time stop e chiusura d'ufficio a fine storico
+ */
+export type WorldExitKind =
+  | "channel_break" | "stop" | "trail" | "trim" | "regime" | "time" | "end_of_test";
 
 export interface WorldTrade {
   ticker: string;
@@ -154,7 +263,7 @@ export interface WorldTrade {
   pnl: number;
   returnPct: number;
   barsHeld: number;
-  outcome: "channel_break" | "time" | "end_of_test";
+  outcome: WorldExitKind;
 }
 
 /** Attribuzione per titolo: quanto ha reso davvero ogni nome (passaggio 4). */
@@ -193,6 +302,16 @@ export interface WorldMomentumResult {
   perTicker: TickerAttribution[];
   rankingHistory: RankingSnapshot[];
   walkForward?: WalkForwardReport;
+  /**
+   * La stessa strategia SENZA volatility targeting, simulata sugli stessi dati
+   * e la stessa finestra: è il termine di paragone per misurare quanto rischio
+   * toglie la protezione e quanto rendimento costa. Assente se volTarget = 0.
+   */
+  comparison?: {
+    summary: BacktestSummary;
+    equity: { date: string; equity: number }[];
+    walkForward?: WalkForwardReport;
+  };
   options: ResolvedWorldOptions;
   tickersTested: number;
   signalsTotal: number;
@@ -208,6 +327,8 @@ interface TickerData {
   closes: number[];
   /** Metatitolo su close aggiustati (total return), allineato per data. */
   meta: number[];
+  /** ATR(14) di Wilder barra per barra (NaN nel warm-up). */
+  atr: number[];
   dateIdx: Map<string, number>;
 }
 
@@ -217,6 +338,179 @@ interface OpenPosition {
   entryDate: string;
   entryPrice: number;
   shares: number;
+  /** Stato dello stop sul prezzo (-Infinity = nessuno stop). */
+  risk: RiskState;
+}
+
+// ─── Gestione del rischio: helper puri, condivisi da backtest e replay ───────
+
+/**
+ * Regime del benchmark barra per barra: true = si può comprare. Con isteresi
+ * h > 0 lo stato cambia solo uscendo dalla banda [SMA×(1−h), SMA×(1+h)];
+ * dentro la banda resta quello precedente — per questo serve il replay
+ * dall'inizio della serie. Con h = 0 è il semplice "close > SMA".
+ */
+export function regimeMap(
+  benchCandles: { date: string; close: number; adjClose?: number }[],
+  opts: Pick<ResolvedWorldOptions, "regimeSma" | "regimeHysteresisPct">
+): Map<string, boolean> {
+  const out = new Map<string, boolean>();
+  const h = opts.regimeHysteresisPct / 100;
+  const closes = benchCandles.map((c) => c.adjClose ?? c.close);
+  let sum = 0;
+  let ok = true; // prima di avere la SMA non si blocca nulla: il warm-up non è un bear
+  for (let i = 0; i < closes.length; i++) {
+    sum += closes[i];
+    if (i >= opts.regimeSma) sum -= closes[i - opts.regimeSma];
+    if (i >= opts.regimeSma - 1) {
+      const sma = sum / opts.regimeSma;
+      if (h === 0) ok = closes[i] > sma;
+      else if (ok) ok = closes[i] > sma * (1 - h);
+      else ok = closes[i] > sma * (1 + h);
+    }
+    out.set(benchCandles[i].date, ok);
+  }
+  return out;
+}
+
+/**
+ * Esposizione obiettivo col volatility targeting: volTarget / volatilità
+ * realizzata della curva di equity, limitata a [minExposure, 1]. Non si va
+ * mai a leva (tetto 1): lo scopo è togliere rischio, non aggiungerlo.
+ * Senza abbastanza storia restituisce 1 (nessuna riduzione).
+ */
+export function targetExposure(
+  equity: { equity: number }[],
+  opts: Pick<ResolvedWorldOptions, "volTarget" | "volWindow" | "minExposure">
+): number {
+  if (!(opts.volTarget > 0)) return 1;
+  const annual = realizedVol(equity, opts.volWindow);
+  if (annual == null || !(annual > 0)) return 1;
+  return Math.min(1, Math.max(opts.minExposure, opts.volTarget / annual));
+}
+
+/** Volatilità annua (%) dei rendimenti giornalieri delle ultime `window` barre; null se poche. */
+export function realizedVol(equity: { equity: number }[], window: number): number | null {
+  if (equity.length < window + 1) return null;
+  const w = equity.slice(-(window + 1));
+  const rets: number[] = [];
+  for (let i = 1; i < w.length; i++) {
+    if (w[i - 1].equity > 0) rets.push(Math.log(w[i].equity / w[i - 1].equity));
+  }
+  if (rets.length < 10) return null;
+  const m = rets.reduce((a, b) => a + b, 0) / rets.length;
+  const v = rets.reduce((a, b) => a + (b - m) ** 2, 0) / (rets.length - 1);
+  return Math.sqrt(v * 252) * 100;
+}
+
+/**
+ * Correlazione dei rendimenti giornalieri di due titoli sulle `window` barre
+ * che terminano alla data della barra `endIdx` di `a`. Le date sono allineate
+ * per data, non per indice: i due titoli possono avere buchi diversi.
+ */
+export function returnCorrelation(
+  a: { candles: { date: string; close: number }[] },
+  b: { candles: { date: string; close: number }[]; dateIdx: Map<string, number> },
+  endIdx: number,
+  window = 60
+): number {
+  const ra: number[] = [];
+  const rb: number[] = [];
+  for (let k = endIdx - window + 1; k <= endIdx; k++) {
+    if (k < 1) continue;
+    const j = b.dateIdx.get(a.candles[k].date);
+    const jp = b.dateIdx.get(a.candles[k - 1].date);
+    if (j == null || jp == null) continue;
+    ra.push(Math.log(a.candles[k].close / a.candles[k - 1].close));
+    rb.push(Math.log(b.candles[j].close / b.candles[jp].close));
+  }
+  const n = ra.length;
+  if (n < 20) return 0; // troppo pochi punti per dire qualcosa: non blocca
+  const ma = ra.reduce((x, y) => x + y, 0) / n;
+  const mb = rb.reduce((x, y) => x + y, 0) / n;
+  let cov = 0, va = 0, vb = 0;
+  for (let i = 0; i < n; i++) {
+    cov += (ra[i] - ma) * (rb[i] - mb);
+    va += (ra[i] - ma) ** 2;
+    vb += (rb[i] - mb) ** 2;
+  }
+  return va > 0 && vb > 0 ? cov / Math.sqrt(va * vb) : 0;
+}
+
+/**
+ * Stato dello stop di una posizione aperta. `initial` resta fisso, `stop` sale
+ * col trailing: se a farti uscire è un livello sopra l'iniziale, è un trailing.
+ */
+export interface RiskState {
+  initial: number;
+  stop: number;
+  highSince: number;
+}
+
+/** ATR(14) di Wilder per ogni barra. Solo dati passati: nessuno sguardo avanti. */
+export function atrSeries(candles: { high: number; low: number; close: number }[], period = 14): number[] {
+  const out = new Array<number>(candles.length).fill(NaN);
+  let value = NaN;
+  let sum = 0;
+  for (let i = 1; i < candles.length; i++) {
+    const c = candles[i];
+    const pc = candles[i - 1].close;
+    const tr = Math.max(c.high - c.low, Math.abs(c.high - pc), Math.abs(c.low - pc));
+    if (i <= period) {
+      sum += tr;
+      if (i === period) value = sum / period;
+    } else {
+      value = (value * (period - 1) + tr) / period;
+    }
+    out[i] = value;
+  }
+  return out;
+}
+
+/**
+ * Stop all'ingresso. Con più regole attive vince la più stretta (la più alta).
+ * L'ATR è quello della barra del SEGNALE — noto al close, prima di eseguire.
+ */
+export function initialStop(entryPrice: number, atrAtSignal: number, opts: ResolvedWorldOptions): RiskState {
+  let stop = -Infinity;
+  if (opts.stopAtr > 0 && atrAtSignal > 0) stop = Math.max(stop, entryPrice - opts.stopAtr * atrAtSignal);
+  if (opts.stopPct > 0) stop = Math.max(stop, entryPrice * (1 - opts.stopPct / 100));
+  return { initial: stop, stop, highSince: entryPrice };
+}
+
+/**
+ * Lo stop è stato toccato in questa barra? Gap sotto lo stop → si esce
+ * all'apertura (peggio dello stop: succede davvero); altrimenti, se il minimo
+ * lo buca, si esce allo stop. Lo stop qui è sempre quello fissato PRIMA di
+ * questa barra.
+ */
+export function stopHit(
+  bar: { open: number; low: number },
+  risk: RiskState
+): { price: number; kind: "stop" | "trail" } | null {
+  if (!(risk.stop > 0)) return null;
+  const kind = risk.stop > risk.initial ? "trail" : "stop";
+  if (bar.open <= risk.stop) return { price: bar.open, kind };
+  if (bar.low <= risk.stop) return { price: risk.stop, kind };
+  return null;
+}
+
+/**
+ * Trascina lo stop dopo aver controllato le uscite della barra, con massimo e
+ * ATR di questa barra: vale dalla barra successiva in poi. Lo stop non scende
+ * mai. L'ATR è quello corrente, non quello d'ingresso: un titolo che quadruplica
+ * ha oscillazioni in dollari quadruple, e un trailing tarato sul prezzo
+ * d'ingresso diventerebbe un filo che si spezza al primo respiro.
+ */
+export function trailStop(
+  risk: RiskState,
+  bar: { high: number },
+  atrNow: number,
+  opts: ResolvedWorldOptions
+): void {
+  risk.highSince = Math.max(risk.highSince, bar.high);
+  if (opts.trailAtr > 0 && atrNow > 0) risk.stop = Math.max(risk.stop, risk.highSince - opts.trailAtr * atrNow);
+  if (opts.trailPct > 0) risk.stop = Math.max(risk.stop, risk.highSince * (1 - opts.trailPct / 100));
 }
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
@@ -277,15 +571,20 @@ function emptySummary(accountSize: number): BacktestSummary {
 }
 
 function buildSummary(
-  trades: WorldTrade[],
+  allRows: WorldTrade[],
   finalEquity: number,
   maxDd: number,
   opts: ResolvedWorldOptions
 ): BacktestSummary {
+  // Il profit factor è in dollari: conta ogni riga, vendite parziali incluse.
+  const grossProfit = allRows.filter((t) => t.pnl > 0).reduce((s, t) => s + t.pnl, 0);
+  const grossLoss = Math.abs(allRows.filter((t) => t.pnl <= 0).reduce((s, t) => s + t.pnl, 0));
+  // Conteggi, win rate e medie invece si fanno sui soli round-trip: una
+  // riduzione d'esposizione non è un trade indipendente, e contarla gonfierebbe
+  // il numero di operazioni e falserebbe la percentuale di vincenti.
+  const trades = allRows.filter((t) => t.outcome !== "trim");
   const wins = trades.filter((t) => t.pnl > 0);
   const losses = trades.filter((t) => t.pnl <= 0);
-  const grossProfit = wins.reduce((s, t) => s + t.pnl, 0);
-  const grossLoss = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
   const years =
     (new Date(opts.endDate).getTime() - new Date(opts.startDate).getTime()) / (365.25 * 86_400_000);
   const cagr =
@@ -314,10 +613,13 @@ function buildSummary(
     totalReturn: +(((finalEquity - opts.accountSize) / opts.accountSize) * 100).toFixed(1),
     cagr: +cagr.toFixed(1),
     finalEquity: +finalEquity.toFixed(0),
+    // BacktestSummary ha tre secchi condivisi con gli altri motori: qui "target"
+    // sono le prese di profitto parziali, "stop" ogni uscita di rischio o di
+    // segnale, "time" time stop e chiusura a fine storico.
     byOutcome: {
-      target: 0, // non esiste un target fisso in questo schema
-      stop: trades.filter((t) => t.outcome === "channel_break").length,
-      time: trades.filter((t) => t.outcome !== "channel_break").length,
+      target: allRows.filter((t) => t.outcome === "trim").length,
+      stop: trades.filter((t) => ["channel_break", "stop", "trail", "regime"].includes(t.outcome)).length,
+      time: trades.filter((t) => t.outcome === "time" || t.outcome === "end_of_test").length,
     },
   };
 }
@@ -331,18 +633,21 @@ export function attributeByTicker(trades: WorldTrade[]): TickerAttribution[] {
     byTicker.set(t.ticker, arr);
   }
   const rows: TickerAttribution[] = [];
-  for (const [ticker, ts] of byTicker) {
+  for (const [ticker, all] of byTicker) {
+    // P&L in dollari da tutte le righe; conteggi e medie dai soli round-trip.
+    const ts = all.filter((t) => t.outcome !== "trim");
+    const n = ts.length || 1;
     const wins = ts.filter((t) => t.pnl > 0).length;
     rows.push({
       ticker,
       trades: ts.length,
       wins,
-      winRate: +((wins / ts.length) * 100).toFixed(1),
-      realizedPnl: +ts.reduce((s, t) => s + t.pnl, 0).toFixed(2),
-      avgReturnPct: +(ts.reduce((s, t) => s + t.returnPct, 0) / ts.length).toFixed(2),
-      bestPct: +Math.max(...ts.map((t) => t.returnPct)).toFixed(2),
-      worstPct: +Math.min(...ts.map((t) => t.returnPct)).toFixed(2),
-      avgBarsHeld: +(ts.reduce((s, t) => s + t.barsHeld, 0) / ts.length).toFixed(1),
+      winRate: ts.length ? +((wins / ts.length) * 100).toFixed(1) : 0,
+      realizedPnl: +all.reduce((s, t) => s + t.pnl, 0).toFixed(2),
+      avgReturnPct: +(ts.reduce((s, t) => s + t.returnPct, 0) / n).toFixed(2),
+      bestPct: ts.length ? +Math.max(...ts.map((t) => t.returnPct)).toFixed(2) : 0,
+      worstPct: ts.length ? +Math.min(...ts.map((t) => t.returnPct)).toFixed(2) : 0,
+      avgBarsHeld: +(ts.reduce((s, t) => s + t.barsHeld, 0) / n).toFixed(1),
     });
   }
   return rows.sort((a, b) => b.realizedPnl - a.realizedPnl);
@@ -360,10 +665,19 @@ interface SimOutput {
   signalsTaken: number;
 }
 
+/**
+ * Cache dei canali di regressione per (titolo, barra, finestra). Un canale
+ * dipende solo dalla serie e dalla finestra, non da sizing né da stop: fra la
+ * strategia con e senza protezione, e fra i fold del walk-forward, i canali
+ * sono identici. Senza cache si rifittano decine di migliaia di volte.
+ */
+type ChannelCache = Map<string, RegressionChannel | null>;
+
 function simulate(
   allData: TickerData[],
   benchCandles: Candle[],
-  opts: ResolvedWorldOptions
+  opts: ResolvedWorldOptions,
+  cache: ChannelCache = new Map()
 ): SimOutput {
   const slip = opts.slippageBps / 10_000;
   const dates = benchCandles
@@ -382,18 +696,7 @@ function simulate(
 
   // Mappa di regime: benchmark sopra la propria SMA, calcolata su tutta la
   // serie (serve il warm-up) ma letta solo alla data corrente — nessun futuro.
-  const regimeOk = new Map<string, boolean>();
-  if (opts.useRegime) {
-    const closes = benchCandles.map((c) => px(c));
-    let sum = 0;
-    for (let i = 0; i < closes.length; i++) {
-      sum += closes[i];
-      if (i >= opts.regimeSma) sum -= closes[i - opts.regimeSma];
-      const sma = i >= opts.regimeSma - 1 ? sum / opts.regimeSma : NaN;
-      // Prima di avere la SMA non si blocca nulla: il warm-up non è un bear.
-      regimeOk.set(benchCandles[i].date, isNaN(sma) ? true : closes[i] > sma);
-    }
-  }
+  const regimeOk = opts.useRegime ? regimeMap(benchCandles, opts) : new Map<string, boolean>();
 
   let realized = opts.accountSize; // capitale realizzato (aperte valutate al costo)
   let peak = realized;
@@ -407,24 +710,61 @@ function simulate(
   let signalsTotal = 0;
   let signalsTaken = 0;
 
-  /** Il canale prezzo di un titolo alla barra `barIdx`, o null se non fittabile. */
-  const priceChannelAt = (td: TickerData, barIdx: number) => {
-    const w = windowAt(td.closes, barIdx, opts.priceWindow);
-    return w ? regressionChannel(w, 2) : null;
+  const cached = (k: string, compute: () => RegressionChannel | null) => {
+    if (cache.has(k)) return cache.get(k)!;
+    const v = compute();
+    cache.set(k, v);
+    return v;
   };
 
+  /** Il canale prezzo di un titolo alla barra `barIdx`, o null se non fittabile. */
+  const priceChannelAt = (td: TickerData, barIdx: number) =>
+    cached(`p|${td.ticker}|${barIdx}|${opts.priceWindow}`, () => {
+      const w = windowAt(td.closes, barIdx, opts.priceWindow);
+      return w ? regressionChannel(w, 2) : null;
+    });
+
   /** Il canale del metatitolo di un titolo alla barra `barIdx`. */
-  const metaChannelAt = (td: TickerData, barIdx: number) => {
-    const w = windowAt(td.meta, barIdx, opts.metaWindow);
-    return w ? regressionChannel(w, 2) : null;
-  };
+  const metaChannelAt = (td: TickerData, barIdx: number) =>
+    cached(`m|${td.ticker}|${barIdx}|${opts.metaWindow}`, () => {
+      const w = windowAt(td.meta, barIdx, opts.metaWindow);
+      return w ? regressionChannel(w, 2) : null;
+    });
 
   for (let di = 0; di < dates.length; di++) {
     const date = dates[di];
     const isScan = di % opts.scanFreq === 0;
 
-    // ── 1. Uscite. La regola di uscita È la strategia: nessuno stop ATR di
-    // contorno, altrimenti non si misura la regola che si vuole testare.
+    /** Chiude (tutta o in parte) una posizione e la registra. */
+    const close = (
+      ticker: string,
+      pos: OpenPosition,
+      rawPrice: number,
+      shares: number,
+      outcome: WorldExitKind
+    ) => {
+      const exitPrice = rawPrice * (1 - slip);
+      const pnl = shares * (exitPrice - pos.entryPrice);
+      realized += pnl;
+      trades.push({
+        ticker,
+        entryDate: pos.entryDate,
+        entryPrice: +pos.entryPrice.toFixed(4),
+        exitDate: date,
+        exitPrice: +exitPrice.toFixed(4),
+        shares: +shares.toFixed(4),
+        pnl: +pnl.toFixed(2),
+        returnPct: +(((exitPrice - pos.entryPrice) / pos.entryPrice) * 100).toFixed(2),
+        barsHeld: di - pos.entryBar,
+        outcome,
+      });
+    };
+
+    // ── 1. Uscite, in ordine di priorità: stop sul prezzo (intrabarra, scatta
+    // per primo perché succede durante la seduta), poi la regola della
+    // strategia al close, poi time stop e regime. Lo stop si trascina solo
+    // DOPO, con i dati di oggi, e vale da domani.
+    const regimeBad = opts.useRegime && regimeOk.get(date) === false;
     for (const [ticker, pos] of [...openPositions]) {
       if (pos.entryBar > di) continue; // entra domani, non è ancora sul libro
       const td = dataByTicker.get(ticker);
@@ -434,53 +774,45 @@ function simulate(
 
       const bar = td.candles[barIdx];
       const barsHeld = di - pos.entryBar;
-      let exit = false;
-      let outcome: WorldTrade["outcome"] = "channel_break";
 
+      const hit = stopHit(bar, pos.risk);
+      if (hit) {
+        close(ticker, pos, hit.price, pos.shares, hit.kind);
+        openPositions.delete(ticker);
+        continue;
+      }
+
+      let outcome: WorldExitKind | null = null;
       switch (opts.exitRule) {
         case "price_band": {
           // Il canale si rifitta ogni giorno: la banda inferiore si muove con
           // il trend. Uscita sul close, non intrabarra — la banda è un livello
           // statistico, non un ordine di stop appoggiato al book.
           const ch = priceChannelAt(td, barIdx);
-          if (ch && bar.close < ch.lowerNow) exit = true;
+          if (ch && bar.close < ch.lowerNow) outcome = "channel_break";
           break;
         }
         case "channel_flat": {
           const ch = priceChannelAt(td, barIdx);
-          if (ch && (ch.trend !== "asc" || ch.r2 < opts.minPriceR2)) exit = true;
+          if (ch && (ch.trend !== "asc" || ch.r2 < opts.minPriceR2)) outcome = "channel_break";
           break;
         }
         case "meta_break": {
           const ch = metaChannelAt(td, barIdx);
-          if (ch && (ch.trend !== "asc" || ch.r2 < opts.minMetaR2)) exit = true;
+          if (ch && (ch.trend !== "asc" || ch.r2 < opts.minMetaR2)) outcome = "channel_break";
           break;
         }
       }
+      if (!outcome && opts.maxHoldBars > 0 && barsHeld >= opts.maxHoldBars) outcome = "time";
+      if (!outcome && opts.regimeExit && regimeBad) outcome = "regime";
 
-      if (!exit && opts.maxHoldBars > 0 && barsHeld >= opts.maxHoldBars) {
-        exit = true;
-        outcome = "time";
-      }
-
-      if (exit) {
-        const exitPrice = bar.close * (1 - slip);
-        const pnl = pos.shares * (exitPrice - pos.entryPrice);
-        realized += pnl;
-        trades.push({
-          ticker,
-          entryDate: pos.entryDate,
-          entryPrice: +pos.entryPrice.toFixed(4),
-          exitDate: date,
-          exitPrice: +exitPrice.toFixed(4),
-          shares: pos.shares,
-          pnl: +pnl.toFixed(2),
-          returnPct: +(((exitPrice - pos.entryPrice) / pos.entryPrice) * 100).toFixed(2),
-          barsHeld,
-          outcome,
-        });
+      if (outcome) {
+        close(ticker, pos, bar.close, pos.shares, outcome);
         openPositions.delete(ticker);
+        continue;
       }
+
+      trailStop(pos.risk, bar, td.atr[barIdx], opts);
     }
 
     // ── 2. Mark-to-market giornaliero + curva del realizzato.
@@ -499,6 +831,56 @@ function simulate(
     realizedCurve.push({ date, realized: +(realized - opts.accountSize).toFixed(2) });
 
     if (!isScan) continue;
+
+    // ── 2b. Tetto al peso. Un vincitore che quadruplica arriva a pesare un
+    // terzo del portafoglio, e il suo ritracciamento diventa il drawdown di
+    // tutti. Si vende solo l'eccedenza: la posizione resta aperta e continua a
+    // seguire la sua regola di uscita.
+    if (opts.maxWeight > 0 && mtm > 0) {
+      for (const [ticker, pos] of openPositions) {
+        if (pos.entryBar > di) continue;
+        const td = dataByTicker.get(ticker);
+        const barIdx = td?.dateIdx.get(date);
+        if (!td || barIdx == null) continue;
+        const px0 = td.candles[barIdx].close;
+        const excess = pos.shares * px0 - opts.maxWeight * mtm;
+        if (excess <= 0) continue;
+        const sell = excess / px0;
+        close(ticker, pos, px0, sell, "trim");
+        pos.shares = +(pos.shares - sell).toFixed(4);
+      }
+    }
+
+    // ── 2c. Volatility targeting. Se la volatilità realizzata della strategia
+    // supera l'obiettivo, si riduce in proporzione TUTTO il portafoglio (non i
+    // singoli titoli: è il rischio aggregato che si sta governando). Non si
+    // ricompra quando la volatilità scende: l'esposizione torna su con le
+    // nuove entrate, che evita di girare il portafoglio a ogni oscillazione.
+    const exposure = targetExposure(equityCurve, opts);
+    if (opts.volTarget > 0 && mtm > 0) {
+      let gross = 0;
+      const marks: [string, OpenPosition, number][] = [];
+      for (const [ticker, pos] of openPositions) {
+        if (pos.entryBar > di) continue;
+        const td = dataByTicker.get(ticker);
+        const barIdx = td?.dateIdx.get(date);
+        if (!td || barIdx == null) continue;
+        const pxNow = td.candles[barIdx].close;
+        gross += pos.shares * pxNow;
+        marks.push([ticker, pos, pxNow]);
+      }
+      const grossPct = gross / mtm;
+      // Tolleranza di 5 punti: niente vendite microscopiche a ogni scan.
+      if (grossPct > exposure + 0.05) {
+        const keep = exposure / grossPct;
+        for (const [ticker, pos, pxNow] of marks) {
+          const sell = pos.shares * (1 - keep);
+          if (sell <= 0) continue;
+          close(ticker, pos, pxNow, sell, "trim");
+          pos.shares = +(pos.shares - sell).toFixed(4);
+        }
+      }
+    }
 
     // ── 3. Stadio 1 — chi è più forte del benchmark, oggi.
     const strong: RankingSnapshot["strong"] = [];
@@ -547,10 +929,46 @@ function simulate(
     entries.sort((a, b) => b.rs - a.rs);
     const slots = opts.maxPositions - openPositions.size;
 
-    for (const e of entries.slice(0, slots)) {
+    // Volatilità di riferimento per il sizing "invvol": la mediana dell'ATR%
+    // dell'universo oggi. Nessuna costante tarata a mano: il titolo tipico
+    // riceve lo slot pieno, uno volatile il doppio riceve metà.
+    let medianAtrPct = NaN;
+    if (opts.sizing === "invvol" && entries.length) {
+      const v: number[] = [];
+      for (const td of allData) {
+        const i = td.dateIdx.get(date);
+        if (i == null) continue;
+        const a = td.atr[i] / td.closes[i];
+        if (a > 0 && isFinite(a)) v.push(a);
+      }
+      v.sort((a, b) => a - b);
+      if (v.length) medianAtrPct = v[v.length >> 1];
+    }
+
+    let opened = 0;
+    for (const e of entries) {
+      if (opened >= slots) break;
       const nextDate = dates[di + 1];
       if (!nextDate) break;
       const td = dataByTicker.get(e.ticker)!;
+
+      // Diversificazione: niente secondo/terzo titolo dello stesso settore, né
+      // un titolo che si muove come uno già in portafoglio. Cinque semiconduttori
+      // non sono cinque posizioni, sono una posizione con la leva.
+      if (opts.maxPerSector > 0) {
+        const sec = sectorFor(e.ticker);
+        const same = [...openPositions.keys()].filter((t) => sectorFor(t) === sec).length;
+        if (same >= opts.maxPerSector) continue;
+      }
+      if (opts.maxCorr > 0) {
+        const sig = td.dateIdx.get(date);
+        if (sig == null) continue;
+        const tooClose = [...openPositions.keys()].some((t) => {
+          const other = dataByTicker.get(t);
+          return other ? returnCorrelation(td, other, sig) > opts.maxCorr : false;
+        });
+        if (tooClose) continue;
+      }
       const nextIdx = td.dateIdx.get(nextDate);
       if (nextIdx == null) continue;
 
@@ -563,7 +981,14 @@ function simulate(
       const cash = realized - committed;
       if (cash <= 0) break;
 
-      let shares = realized / opts.maxPositions / entryPrice;
+      const sigIdx = td.dateIdx.get(date)!;
+      const atrSig = td.atr[sigIdx];
+      let slot = (realized / opts.maxPositions) * exposure;
+      if (opts.sizing === "invvol" && medianAtrPct > 0) {
+        const myAtrPct = atrSig / td.closes[sigIdx];
+        if (myAtrPct > 0) slot *= Math.min(1.5, Math.max(0.5, medianAtrPct / myAtrPct));
+      }
+      let shares = slot / entryPrice;
       if (shares * entryPrice > cash) shares = cash / entryPrice;
       if (!(shares > 0)) continue;
 
@@ -573,8 +998,10 @@ function simulate(
         entryDate: nextDate,
         entryPrice,
         shares: +shares.toFixed(4),
+        risk: initialStop(entryPrice, atrSig, opts),
       });
       signalsTaken++;
+      opened++;
     }
   }
 
@@ -657,6 +1084,8 @@ export interface WorldAnalysis {
   /** Regime del benchmark: quando è false, la strategia non apre nuove posizioni. */
   regimeOk: boolean;
   regimeNote: string;
+  /** Quota di capitale da investire oggi secondo il volatility targeting. */
+  exposure: { pct: number; realizedVol: number | null; note: string };
   leaders: WorldLeader[];
   options: ResolvedWorldOptions;
 }
@@ -713,6 +1142,7 @@ export async function runWorldAnalysis(
 
   let done = 0;
   const total = def.tickers.length;
+  const simData: TickerData[] = [];
 
   const rows = await pool(def.tickers, 8, async (ticker) => {
     const candles = await fetchCandles(ticker, 2);
@@ -726,6 +1156,9 @@ export async function runWorldAnalysis(
       return b && b > 0 ? px(c) / b : NaN;
     });
     const last = candles.length - 1;
+    const dateIdx = new Map<string, number>();
+    candles.forEach((c, i) => dateIdx.set(c.date, i));
+    simData.push({ ticker, candles, closes, meta, atr: atrSeries(candles), dateIdx });
 
     const metaWin = windowAt(meta, last, opts.metaWindow);
     const metaChannel = metaWin ? regressionChannel(metaWin, 2) : null;
@@ -745,6 +1178,29 @@ export async function runWorldAnalysis(
       metaSpark: (metaWin ?? []).map((v) => +v.toFixed(6)),
     };
   }).then((r) => r.filter((x): x is NonNullable<typeof x> => x !== null));
+
+  // ── Esposizione consigliata oggi. Il volatility targeting non cambia QUALI
+  // titoli comprare, ma QUANTO: serve la volatilità realizzata della strategia,
+  // cioè la sua curva di equity. La si ricostruisce simulando l'ultimo anno
+  // con le stesse identiche regole del backtest, sui dati appena scaricati.
+  const exposure = (() => {
+    if (!(opts.volTarget > 0) || simData.length === 0) {
+      return { pct: 100, realizedVol: null as number | null, note: "Volatility targeting disattivo: esposizione piena." };
+    }
+    const lastDate = benchCandles[benchCandles.length - 1].date;
+    const from = benchCandles[Math.max(0, benchCandles.length - 252)].date;
+    const sim = simulate(simData, benchCandles, { ...opts, startDate: from, endDate: lastDate });
+    const e = targetExposure(sim.equity, opts);
+    const vol = realizedVol(sim.equity, opts.volWindow);
+    const pct = Math.round(e * 100);
+    const note =
+      vol == null
+        ? "Storico insufficiente per misurare la volatilità: esposizione piena."
+        : pct >= 100
+        ? `Volatilità della strategia ${vol.toFixed(1)}% annua, sotto l'obiettivo del ${opts.volTarget}%: esposizione piena.`
+        : `Volatilità della strategia ${vol.toFixed(1)}% annua, sopra l'obiettivo del ${opts.volTarget}%: investi il ${pct}% di quanto faresti normalmente.`;
+    return { pct, realizedVol: vol, note };
+  })();
 
   // ── Stadio 1: chi batte il benchmark.
   const strong = rows
@@ -820,6 +1276,7 @@ export async function runWorldAnalysis(
     analyzedAt: new Date().toISOString(),
     regimeOk,
     regimeNote,
+    exposure,
     leaders,
     options: opts,
   };
@@ -870,7 +1327,7 @@ export interface WorldTickerDetail {
   priceChannel: ChannelDetail | null;
   signal: "COMPRA" | "ATTENDI" | "DEBOLE";
   reason: string;
-  /** Serie lunga di contesto (fino a 250 barre) per inquadrare la finestra. */
+  /** Tutto lo storico allineato (prezzo e metatitolo): l'asse condiviso dei grafici. */
   context: { date: string; close: number; meta: number }[];
   regimeOk: boolean;
   regimeNote: string;
@@ -918,8 +1375,11 @@ export async function runWorldTickerDetail(
   options: Omit<WorldMomentumOptions, "startDate" | "endDate"> & {
     startDate?: string;
     endDate?: string;
+    /** Anni di storico: lo stesso dello storico segnali, così i grafici condividono l'asse. */
+    years?: number;
   }
 ): Promise<WorldTickerDetail> {
+  const years = Math.min(10, Math.max(2, options.years ?? 5));
   const today = new Date().toISOString().slice(0, 10);
   const opts = resolveWorldOptions({
     startDate: options.startDate ?? today,
@@ -928,8 +1388,8 @@ export async function runWorldTickerDetail(
   } as WorldMomentumOptions);
 
   const [benchCandles, candles] = await Promise.all([
-    fetchCandles(opts.benchmark, 2),
-    fetchCandles(ticker, 2),
+    fetchCandles(opts.benchmark, years),
+    fetchCandles(ticker, years),
   ]);
   if (candles.length < opts.metaWindow + 180) {
     throw new Error(`Dati insufficienti per ${ticker} (${candles.length} barre)`);
@@ -1002,11 +1462,10 @@ export async function runWorldTickerDetail(
     reason = `Forte sul benchmark e prezzo a inizio canale (z ${priceDetail.channel.z}).`;
   }
 
-  const ctxLen = Math.min(250, aligned.length);
-  const context = aligned.slice(-ctxLen).map((c, i) => ({
+  const context = aligned.map((c, i) => ({
     date: c.date,
     close: +c.close.toFixed(2),
-    meta: +meta[aligned.length - ctxLen + i].toFixed(6),
+    meta: +meta[i].toFixed(6),
   }));
 
   return {
@@ -1311,6 +1770,21 @@ export function resolveWorldOptions(opts: WorldMomentumOptions): ResolvedWorldOp
     regimeSma: opts.regimeSma ?? 200,
     scanFreq: opts.scanFreq ?? 5,
     maxHoldBars: opts.maxHoldBars ?? 0,
+    stopAtr: opts.stopAtr ?? 0,
+    stopPct: opts.stopPct ?? 0,
+    trailAtr: opts.trailAtr ?? 0,
+    trailPct: opts.trailPct ?? 0,
+    maxWeight: opts.maxWeight ?? 0,
+    sizing: opts.sizing ?? "equal",
+    regimeExit: opts.regimeExit ?? false,
+    regimeHysteresisPct: opts.regimeHysteresisPct ?? 0,
+    maxCorr: opts.maxCorr ?? 0,
+    maxPerSector: opts.maxPerSector ?? 0,
+    // Adottato dopo la validazione (intestazione del modulo): l'unico
+    // meccanismo che taglia il drawdown nel campione E fuori campione.
+    volTarget: opts.volTarget ?? 20,
+    volWindow: opts.volWindow ?? 42,
+    minExposure: opts.minExposure ?? 0.25,
     folds: opts.folds ?? 0,
     w30: opts.w30 ?? 0.2,
     w90: opts.w90 ?? 0.5,
@@ -1357,13 +1831,14 @@ export async function runWorldMomentum(
     });
     const dateIdx = new Map<string, number>();
     candles.forEach((c, i) => dateIdx.set(c.date, i));
-    return { ticker, candles, closes, meta, dateIdx };
+    return { ticker, candles, closes, meta, atr: atrSeries(candles), dateIdx };
   });
 
   const allData = rows.filter((r): r is TickerData => r !== null);
   if (allData.length === 0) throw new Error("Nessun titolo con dati sufficienti");
 
-  const full = simulate(allData, benchCandles, opts);
+  const cache: ChannelCache = new Map();
+  const full = simulate(allData, benchCandles, opts, cache);
 
   // Benchmark buy & hold sulla stessa finestra.
   const inWindow = benchCandles.filter((c) => c.date >= opts.startDate && c.date <= opts.endDate);
@@ -1372,20 +1847,29 @@ export async function runWorldMomentum(
     ? inWindow.map((c) => ({ date: c.date, equity: +((opts.accountSize * px(c)) / base).toFixed(2) }))
     : [];
 
-  // Walk-forward: periodi consecutivi, ognuno con capitale fresco.
-  let walkForward: WalkForwardReport | undefined;
-  if (opts.folds >= 2) {
-    const t0 = new Date(opts.startDate).getTime();
-    const t1 = new Date(opts.endDate).getTime();
-    const step = (t1 - t0) / opts.folds;
+  /** Walk-forward: periodi consecutivi, ognuno con capitale fresco. */
+  const walkForwardOf = (o: ResolvedWorldOptions): WalkForwardReport | undefined => {
+    if (o.folds < 2) return undefined;
+    const t0 = new Date(o.startDate).getTime();
+    const t1 = new Date(o.endDate).getTime();
+    const step = (t1 - t0) / o.folds;
     const periods: WalkForwardPeriod[] = [];
-    for (let i = 0; i < opts.folds; i++) {
-      const s = new Date(t0 + step * i).toISOString().slice(0, 10);
-      const e = new Date(t0 + step * (i + 1)).toISOString().slice(0, 10);
-      const r = simulate(allData, benchCandles, { ...opts, startDate: s, endDate: e });
-      periods.push({ start: s, end: e, summary: r.summary });
+    for (let i = 0; i < o.folds; i++) {
+      const s0 = new Date(t0 + step * i).toISOString().slice(0, 10);
+      const e0 = new Date(t0 + step * (i + 1)).toISOString().slice(0, 10);
+      const r = simulate(allData, benchCandles, { ...o, startDate: s0, endDate: e0 }, cache);
+      periods.push({ start: s0, end: e0, summary: r.summary });
     }
-    walkForward = walkForwardStats(periods);
+    return walkForwardStats(periods);
+  };
+
+  const walkForward = walkForwardOf(opts);
+
+  let comparison: WorldMomentumResult["comparison"];
+  if (opts.volTarget > 0) {
+    const bare = { ...opts, volTarget: 0 };
+    const r = simulate(allData, benchCandles, bare, cache);
+    comparison = { summary: r.summary, equity: r.equity, walkForward: walkForwardOf(bare) };
   }
 
   return {
@@ -1397,6 +1881,7 @@ export async function runWorldMomentum(
     perTicker: attributeByTicker(full.trades),
     rankingHistory: full.rankingHistory,
     walkForward,
+    comparison,
     options: opts,
     tickersTested: allData.length,
     signalsTotal: full.signalsTotal,

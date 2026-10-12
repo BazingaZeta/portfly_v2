@@ -29,6 +29,7 @@ export async function GET(req: NextRequest) {
     minPriceR2: num(req, "minPriceR2", 0.5),
     entryMaxZ: num(req, "entryMaxZ", 0),
     useRegime: req.nextUrl.searchParams.get("useRegime") !== "false",
+    volTarget: num(req, "volTarget", 20),
   };
 
   const encoder = new TextEncoder();

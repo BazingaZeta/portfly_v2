@@ -27,6 +27,7 @@ export async function GET(req: NextRequest) {
   try {
     const detail = await runWorldTickerDetail(ticker, {
       indexKey: req.nextUrl.searchParams.get("index") ?? "SP500",
+      years: num(req, "years", 5),
       metaWindow: num(req, "metaWindow", 60),
       minMetaR2: num(req, "minMetaR2", 0.5),
       strongTopN: num(req, "strongTopN", 20),

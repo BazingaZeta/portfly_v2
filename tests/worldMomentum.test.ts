@@ -4,6 +4,14 @@ import {
   attributeByTicker,
   channelDetail,
   replayTickerSignals,
+  atrSeries,
+  initialStop,
+  stopHit,
+  trailStop,
+  regimeMap,
+  returnCorrelation,
+  targetExposure,
+  realizedVol,
   resolveWorldOptions,
   EXIT_RULE_LABELS,
   WORLD_BENCHMARK,
@@ -84,6 +92,17 @@ test("resolveWorldOptions: default documentati", () => {
   // Default adottato dopo il confronto delle tre uscite: vedi l'intestazione
   // del modulo. price_band (la lettura letterale) perdeva denaro.
   assert.equal(o.exitRule, "meta_break");
+  // Protezione dai drawdown adottata dopo la validazione: volatility targeting.
+  assert.equal(o.volTarget, 20);
+  assert.equal(o.volWindow, 42);
+  // Le opzioni scartate restano spente di default.
+  assert.equal(o.stopAtr, 0);
+  assert.equal(o.stopPct, 0);
+  assert.equal(o.trailAtr, 0);
+  assert.equal(o.trailPct, 0);
+  assert.equal(o.maxWeight, 0);
+  assert.equal(o.maxCorr, 0);
+  assert.equal(o.regimeExit, false);
   // I pesi RS devono sommare a 1, altrimenti il composito non è una media.
   assert.equal(+(o.w30 + o.w90 + o.w180).toFixed(6), 1);
 });
@@ -307,4 +326,162 @@ test("replayTickerSignals: il filtro di regime blocca le entrate", () => {
   // Stesso scenario senza filtro: i segnali ci sono.
   const without = replayTickerSignals(series, { ...baseOpts(), exitRule: "meta_break", useRegime: false }, 40);
   assert.ok(without.length > 0);
+});
+
+// ─── Gestione del rischio ────────────────────────────────────────────────────
+
+const riskOpts = (o: Partial<Parameters<typeof resolveWorldOptions>[0]> = {}) =>
+  resolveWorldOptions({ indexKey: "SP500", startDate: "2024-01-01", endDate: "2025-01-01", ...o });
+
+test("atrSeries: su barre identiche l'ATR è l'escursione costante", () => {
+  const c = Array.from({ length: 30 }, () => ({ high: 11, low: 9, close: 10 }));
+  const a = atrSeries(c, 14);
+  assert.ok(Number.isNaN(a[13]), "nel warm-up non c'è ATR");
+  assert.equal(a[14], 2);
+  assert.equal(a[29], 2);
+});
+
+test("atrSeries: tiene conto dei gap (true range, non solo high-low)", () => {
+  const c = Array.from({ length: 20 }, (_, i) =>
+    i < 15 ? { high: 10.5, low: 9.5, close: 10 } : { high: 20.5, low: 19.5, close: 20 });
+  const a = atrSeries(c, 14);
+  // La barra 15 arriva a 20 dopo un close a 10: true range = 20,5 − 10, non 1.
+  assert.ok(a[15] > a[14] + 0.5, `il gap deve far salire l'ATR: ${a[14]} → ${a[15]}`);
+});
+
+test("initialStop: vince la regola più stretta", () => {
+  const r = initialStop(100, 2, riskOpts({ stopAtr: 3, stopPct: 10 }));
+  // 3 × ATR = 94, 10% = 90 → vale 94
+  assert.equal(r.stop, 94);
+  assert.equal(r.initial, 94);
+  assert.equal(r.highSince, 100);
+});
+
+test("initialStop: senza regole non c'è stop", () => {
+  const r = initialStop(100, 2, riskOpts());
+  assert.equal(r.stop, -Infinity);
+  assert.equal(stopHit({ open: 1, low: 0.5 }, r), null);
+});
+
+test("stopHit: gap sotto lo stop → si esce all'apertura, non allo stop", () => {
+  const r = { initial: 90, stop: 90, highSince: 100 };
+  assert.deepEqual(stopHit({ open: 85, low: 80 }, r), { price: 85, kind: "stop" });
+});
+
+test("stopHit: minimo che buca lo stop → si esce allo stop", () => {
+  const r = { initial: 90, stop: 90, highSince: 100 };
+  assert.deepEqual(stopHit({ open: 95, low: 89 }, r), { price: 90, kind: "stop" });
+  assert.equal(stopHit({ open: 95, low: 91 }, r), null);
+});
+
+test("stopHit: uno stop sopra l'iniziale è un trailing", () => {
+  const r = { initial: 90, stop: 110, highSince: 125 };
+  assert.equal(stopHit({ open: 112, low: 108 }, r)?.kind, "trail");
+});
+
+test("trailStop: lo stop sale col massimo e non scende mai", () => {
+  const o = riskOpts({ trailPct: 10 });
+  const r = initialStop(100, 2, o); // nessuno stop iniziale, solo trailing
+  trailStop(r, { high: 120 }, 2, o);
+  assert.equal(r.stop, 108);
+  trailStop(r, { high: 110 }, 2, o); // massimo più basso: lo stop resta dov'è
+  assert.equal(r.stop, 108);
+  assert.equal(r.highSince, 120);
+});
+
+test("trailStop in ATR usa l'ATR corrente, non quello d'ingresso", () => {
+  const o = riskOpts({ trailAtr: 2 });
+  const r = initialStop(100, 1, o);
+  trailStop(r, { high: 400 }, 20, o); // il titolo è quadruplicato e oscilla di più
+  assert.equal(r.stop, 360); // 400 − 2 × 20, non 400 − 2 × 1
+});
+
+// ─── Regime con isteresi ─────────────────────────────────────────────────────
+
+test("regimeMap: con h = 0 è semplicemente close > SMA", () => {
+  const closes = [...Array(5).fill(100), 90, 110, 99];
+  const m = regimeMap(closes.map((c, i) => ({ date: `d${i}`, close: c })), { regimeSma: 5, regimeHysteresisPct: 0 });
+  assert.equal(m.get("d4"), false); // close == SMA: non è sopra
+  assert.equal(m.get("d5"), false);
+  assert.equal(m.get("d6"), true);
+});
+
+test("regimeMap: l'isteresi ignora le oscillazioni dentro la banda", () => {
+  // Banda ±5% attorno alla SMA: si esce sotto SMA×0,95, si rientra sopra SMA×1,05.
+  const closes = [...Array(10).fill(100), 106, 98, 97, 101, 90, 99, 104, 112];
+  const m = regimeMap(closes.map((c, i) => ({ date: `d${i}`, close: c })), { regimeSma: 10, regimeHysteresisPct: 5 });
+  const at = (i: number) => m.get(`d${i}`);
+  assert.equal(at(10), true);   // 106 > SMA
+  assert.equal(at(11), true);   // 98: dentro la banda, resta positivo
+  assert.equal(at(12), true);   // 97: ancora dentro
+  assert.equal(at(14), false);  // 90: sotto la banda → negativo
+  assert.equal(at(16), false);  // 104: dentro la banda, resta negativo
+  assert.equal(at(17), true);   // 112: sopra la banda → positivo
+});
+
+// ─── Correlazione ────────────────────────────────────────────────────────────
+
+function series(closes: number[]) {
+  const candles = closes.map((close, i) => ({
+    date: new Date(Date.UTC(2024, 0, 1) + i * 86_400_000).toISOString().slice(0, 10),
+    close,
+  }));
+  return { candles, dateIdx: new Map(candles.map((c, i) => [c.date, i])) };
+}
+
+test("returnCorrelation: un titolo è perfettamente correlato con se stesso", () => {
+  const a = series(Array.from({ length: 80 }, (_, i) => 100 + Math.sin(i / 3) * 5 + i * 0.1));
+  assert.ok(Math.abs(returnCorrelation(a, a, 79) - 1) < 1e-9);
+});
+
+test("returnCorrelation: rendimenti speculari → correlazione −1", () => {
+  const up = Array.from({ length: 80 }, (_, i) => 100 * Math.exp(0.01 * Math.sin(i)));
+  const down = Array.from({ length: 80 }, (_, i) => 100 * Math.exp(-0.01 * Math.sin(i)));
+  const r = returnCorrelation(series(up), series(down), 79);
+  assert.ok(r < -0.99, `atteso ≈ −1, ottenuto ${r}`);
+});
+
+test("returnCorrelation: troppo pochi punti non bloccano (ritorna 0)", () => {
+  const a = series([100, 101, 102, 103, 104]);
+  assert.equal(returnCorrelation(a, a, 4), 0);
+});
+
+// ─── Volatility targeting ────────────────────────────────────────────────────
+
+function equityFromReturns(rets: number[]) {
+  let e = 10_000;
+  return [{ equity: e }, ...rets.map((r) => ({ equity: (e *= 1 + r) }))];
+}
+
+test("realizedVol: serie piatta → volatilità nulla", () => {
+  assert.equal(realizedVol(equityFromReturns(Array(60).fill(0)), 42), 0);
+});
+
+test("realizedVol: poca storia → null", () => {
+  assert.equal(realizedVol(equityFromReturns(Array(10).fill(0.01)), 42), null);
+});
+
+test("targetExposure: volatilità sotto l'obiettivo → esposizione piena, mai leva", () => {
+  // ±0,3% al giorno ≈ 4,8% annuo, molto sotto il 20%
+  const eq = equityFromReturns(Array.from({ length: 60 }, (_, i) => (i % 2 ? 0.003 : -0.003)));
+  assert.equal(targetExposure(eq, { volTarget: 20, volWindow: 42, minExposure: 0.25 }), 1);
+});
+
+test("targetExposure: volatilità doppia dell'obiettivo → circa metà esposizione", () => {
+  // ±2,52% al giorno: volatilità annua ≈ 40%
+  const eq = equityFromReturns(Array.from({ length: 60 }, (_, i) => (i % 2 ? 0.0252 : -0.0252)));
+  const vol = realizedVol(eq, 42)!;
+  const e = targetExposure(eq, { volTarget: 20, volWindow: 42, minExposure: 0.25 });
+  assert.ok(Math.abs(e - 20 / vol) < 1e-9);
+  assert.ok(e > 0.45 && e < 0.55, `atteso ≈ 0,5, ottenuto ${e}`);
+});
+
+test("targetExposure: nel panico non scende sotto il minimo", () => {
+  const eq = equityFromReturns(Array.from({ length: 60 }, (_, i) => (i % 2 ? 0.08 : -0.08)));
+  assert.equal(targetExposure(eq, { volTarget: 20, volWindow: 42, minExposure: 0.25 }), 0.25);
+});
+
+test("targetExposure: con volTarget 0 non riduce mai", () => {
+  const eq = equityFromReturns(Array.from({ length: 60 }, (_, i) => (i % 2 ? 0.08 : -0.08)));
+  assert.equal(targetExposure(eq, { volTarget: 0, volWindow: 42, minExposure: 0.25 }), 1);
 });
