@@ -5,6 +5,7 @@ import Link from "next/link";
 import { runFetchJob, runSseJob, useJob, usePersistentState } from "@/lib/analysisStore";
 import { ChannelChart } from "@/components/ChannelChart";
 import { LoadingPanel } from "@/components/Loading";
+import { LivePrice, useLivePrices } from "@/components/LivePrice";
 import { money } from "@/lib/format";
 import { INDICES } from "@/lib/indices";
 import type { RegressionChannel } from "@/lib/regression";
@@ -26,6 +27,21 @@ interface Leader {
   channelHigh: number;
   priceSpark: number[];
   metaSpark: number[];
+  anchoredNow?: { price: AnchoredState; meta: AnchoredState };
+  lastDate: string;
+  prevClose: number;
+  chg1m: number | null;
+  chg3m: number | null;
+}
+
+interface AnchoredState {
+  dir: "up" | "down" | "flat";
+  from: string;
+  confirmedAt: string;
+  cause: string;
+  age: number;
+  lower: number | null;
+  upper: number | null;
 }
 
 interface Analysis {
@@ -71,17 +87,27 @@ interface BacktestResult {
     worstProfitFactor: number;
     positivePeriods: number;
   };
-  /** La stessa strategia senza protezione dai drawdown, sugli stessi dati. */
+  /**
+   * Il termine di paragone sugli stessi dati: la strategia precedente (A/B dei
+   * canali ancorati) o la stessa strategia senza protezione dai drawdown.
+   */
   comparison?: {
+    kind: "previous_strategy" | "no_vol_target";
+    label: string;
     summary: BacktestResult["summary"];
     equity: { date: string; equity: number }[];
     walkForward?: BacktestResult["walkForward"];
   };
-  options: { benchmark: string; exitRule: string; maxPositions: number; metaWindow: number; volTarget: number };
+  options: {
+    benchmark: string; exitRule: string; maxPositions: number; metaWindow: number; volTarget: number;
+    channelMode: ChannelMode; anchoredExit: string;
+  };
   tickersTested: number;
 }
 
 // ─── Parametri condivisi fra i due pannelli ──────────────────────────────────
+
+type ChannelMode = "rolling" | "anchored";
 
 interface Params {
   index: string;
@@ -96,6 +122,10 @@ interface Params {
   useRegime: boolean;
   /** Volatility targeting: volatilità annua obiettivo in %, 0 = spento. */
   volTarget: number;
+  /** Come si costruiscono i canali: finestra mobile (attuale) o ancorati (metodo di Antonio). */
+  channelMode: ChannelMode;
+  /** Canali ancorati: quale rottura chiude la posizione. */
+  anchoredExit: string;
 }
 
 const DEFAULTS: Params = {
@@ -110,17 +140,29 @@ const DEFAULTS: Params = {
   years: 5,
   useRegime: true,
   volTarget: 20,
+  channelMode: "rolling",
+  anchoredExit: "meta",
 };
 
 /** Perché si è chiusa una riga del registro: vedi WorldExitKind nel motore. */
 const OUTCOME_LABELS: Record<string, string> = {
-  channel_break: "rottura metatitolo",
+  channel_break: "rottura del canale",
   trim: "riduzione esposizione (parziale)",
   stop: "stop",
   trail: "trailing stop",
   regime: "regime negativo",
   time: "time stop",
   end_of_test: "aperta a fine test",
+};
+
+/**
+ * Uscite dei canali ancorati. L'ordine è quello dell'A/B: la prima è l'unica
+ * che ha battuto la strategia precedente sul periodo di taratura.
+ */
+const ANCHORED_EXIT_LABELS: Record<string, string> = {
+  meta: "Rottura del canale del metatitolo (consigliata)",
+  price: "Rottura del canale del prezzo (regola alla lettera)",
+  price_weekly: "Rottura del prezzo, se anche il settimanale non sale",
 };
 
 const EXIT_LABELS: Record<string, string> = {
@@ -142,6 +184,8 @@ function qs(p: Params): string {
     years: String(p.years),
     useRegime: String(p.useRegime),
     volTarget: String(p.volTarget),
+    channelMode: p.channelMode,
+    anchoredExit: p.anchoredExit,
   }).toString();
 }
 
@@ -194,6 +238,33 @@ function ParamPanel({
           </button>
         </div>
       </div>
+      <div className="flex flex-col gap-2 mb-4">
+        <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">Costruzione dei canali</span>
+        <div className="flex gap-2 flex-wrap">
+          {([
+            ["rolling", "Finestra mobile — strategia attuale"],
+            ["anchored", "Canali ancorati — metodo Antonio"],
+          ] as const).map(([k, label]) => (
+            <button
+              key={k}
+              onClick={() => set("channelMode", k)}
+              disabled={disabled}
+              className={`text-xs px-3 py-1.5 rounded-xl border transition-colors ${
+                params.channelMode === k
+                  ? "bg-[var(--surface-2)] text-[var(--foreground)] border-[var(--accent)]"
+                  : "text-[var(--muted)] border-[var(--border)] hover:text-[var(--foreground)]"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <p className="text-[11px] text-[var(--muted)] max-w-3xl">
+          {params.channelMode === "anchored"
+            ? "Ogni canale nasce alla rottura confermata (2 chiusure) della banda opposta del canale precedente, parte dal minimo o massimo precedente e muore alla rottura. Si compra all'inizio di un canale rialzista del prezzo, su titoli il cui metatitolo è a sua volta in canale rialzista. Il backtest lo confronta con la strategia attuale sugli stessi dati."
+            : "Canale sempre sulle ultime N barre: si compra nella metà bassa di un canale ascendente, si vende alla rottura del canale del metatitolo. È la strategia validata e in uso."}
+        </p>
+      </div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <label className="flex flex-col gap-1">
           <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">Indice</span>
@@ -201,25 +272,39 @@ function ParamPanel({
             {INDICES.map((i) => <option key={i.key} value={i.key}>{i.label}</option>)}
           </select>
         </label>
-        <NumField label="Finestra metatitolo" value={params.metaWindow} min={20} max={150}
-          hint="Barre del canale sul metatitolo (stadio 1). Più lunga = segnale più lento, posizioni tenute più a lungo." onChange={(v) => set("metaWindow", v)} />
-        <NumField label="R² minimo" value={params.minMetaR2} step={0.1} min={0} max={1}
-          hint="Quanto deve essere pulito il trend del metatitolo per considerarlo un canale." onChange={(v) => set("minMetaR2", v)} />
+        {params.channelMode === "rolling" && (
+          <>
+            <NumField label="Finestra metatitolo" value={params.metaWindow} min={20} max={150}
+              hint="Barre del canale sul metatitolo (stadio 1). Più lunga = segnale più lento, posizioni tenute più a lungo." onChange={(v) => set("metaWindow", v)} />
+            <NumField label="R² minimo" value={params.minMetaR2} step={0.1} min={0} max={1}
+              hint="Quanto deve essere pulito il trend del metatitolo per considerarlo un canale." onChange={(v) => set("minMetaR2", v)} />
+          </>
+        )}
         <NumField label="Quanti forti" value={params.strongTopN} min={5} max={60}
           hint="Quanti titoli tenere nell'insieme dei forti (stadio 1)." onChange={(v) => set("strongTopN", v)} />
-        <NumField label="Finestra prezzo" value={params.priceWindow} min={20} max={120}
-          hint="Barre del canale sul prezzo grezzo (stadio 2, il timing)." onChange={(v) => set("priceWindow", v)} />
-        <NumField label="z massimo entrata" value={params.entryMaxZ} step={0.5} min={-2} max={2}
-          hint="Quanto in basso nel canale deve stare il prezzo per comprare. 0 = metà bassa." onChange={(v) => set("entryMaxZ", v)} />
+        {params.channelMode === "rolling" && (
+          <>
+            <NumField label="Finestra prezzo" value={params.priceWindow} min={20} max={120}
+              hint="Barre del canale sul prezzo grezzo (stadio 2, il timing)." onChange={(v) => set("priceWindow", v)} />
+            <NumField label="z massimo entrata" value={params.entryMaxZ} step={0.5} min={-2} max={2}
+              hint="Quanto in basso nel canale deve stare il prezzo per comprare. 0 = metà bassa." onChange={(v) => set("entryMaxZ", v)} />
+          </>
+        )}
         <NumField label="Posizioni max" value={params.maxPositions} min={1} max={15}
           hint="Quante posizioni contemporanee. Meno posizioni = più concentrazione." onChange={(v) => set("maxPositions", v)} />
         <NumField label="Volatilità obiettivo %" value={params.volTarget} step={5} min={0} max={60}
           hint="Riduzione del drawdown: quando la volatilità realizzata della strategia supera questo valore, si investe meno in proporzione. 0 = spento (strategia senza protezione)." onChange={(v) => set("volTarget", v)} />
-        <label className="flex flex-col gap-1">
+        <label className="flex flex-col gap-1 md:col-span-2">
           <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">Regola di uscita</span>
-          <select className="input" value={params.exitRule} onChange={(e) => set("exitRule", e.target.value)}>
-            {Object.entries(EXIT_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-          </select>
+          {params.channelMode === "anchored" ? (
+            <select className="input" value={params.anchoredExit} onChange={(e) => set("anchoredExit", e.target.value)}>
+              {Object.entries(ANCHORED_EXIT_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+            </select>
+          ) : (
+            <select className="input" value={params.exitRule} onChange={(e) => set("exitRule", e.target.value)}>
+              {Object.entries(EXIT_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+            </select>
+          )}
         </label>
       </div>
       <label className="flex items-center gap-2 mt-3 text-xs text-[var(--muted)]">
@@ -247,64 +332,180 @@ function SignalBadge({ signal }: { signal: Leader["signal"] }) {
   );
 }
 
-function LeaderCard({ leader, params }: { leader: Leader; params: Params }) {
+/** Data di oggi a New York: decide se l'ultima barra è la seduta in corso. */
+function todayET(): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date());
+}
+
+function pct(v: number | null | undefined, dp = 1): string {
+  if (v == null || !isFinite(v)) return "—";
+  return `${v >= 0 ? "+" : ""}${v.toFixed(dp)}%`;
+}
+
+function toneOf(v: number | null | undefined): string {
+  if (v == null || !isFinite(v) || v === 0) return "text-[var(--muted)]";
+  return v > 0 ? "text-[var(--positive)]" : "text-[var(--negative)]";
+}
+
+function MiniStat({ label, value, tone, hint }: { label: string; value: string; tone?: string; hint?: string }) {
+  return (
+    <div className="rounded-xl bg-[var(--surface-2)] px-2.5 py-2 min-w-0" title={hint}>
+      <p className="text-[9px] uppercase tracking-wider text-[var(--muted)] truncate">{label}</p>
+      <p className={`font-mono text-sm mt-0.5 truncate ${tone ?? ""}`}>{value}</p>
+    </div>
+  );
+}
+
+/** Pillola dello stato di un canale ancorato: direzione e da quante sedute. */
+function ChannelPill({ label, st }: { label: string; st: AnchoredState }) {
+  const color = st.dir === "up" ? "var(--positive)" : st.dir === "down" ? "var(--negative)" : "var(--muted)";
+  const dir = st.dir === "up" ? "rialzista" : st.dir === "down" ? "ribassista" : "laterale";
+  return (
+    <div className="rounded-xl bg-[var(--surface-2)] p-2.5 min-w-0" style={{ borderLeft: `3px solid ${color}` }}>
+      <p className="text-[9px] uppercase tracking-wider text-[var(--muted)]">{label}</p>
+      <p className="text-xs mt-0.5" style={{ color }}>
+        {st.dir === "up" ? "▲" : st.dir === "down" ? "▼" : "▬"} {dir}
+      </p>
+      <p className="text-[10px] text-[var(--muted)] font-mono mt-0.5">
+        da {st.age} sedute · {st.from}
+      </p>
+    </div>
+  );
+}
+
+function LeaderCard({
+  leader, params, livePrice, marketOpen,
+}: {
+  leader: Leader; params: Params; livePrice?: number; marketOpen: boolean;
+}) {
   const mc = leader.metaChannel;
   const pc = leader.priceChannel;
+  const price = livePrice && livePrice > 0 ? livePrice : leader.price;
+  // Variazione del giorno: contro la chiusura di ieri. Se l'ultima barra
+  // dell'analisi è già la seduta di oggi, "ieri" è la barra prima.
+  const ref = leader.lastDate === todayET() ? leader.prevClose : leader.price;
+  const dayChg = ref > 0 ? ((price - ref) / ref) * 100 : null;
+
+  // Canali ancorati: la banda inferiore del canale del prezzo è dove il canale
+  // si rompe. Con la finestra mobile invece non è un livello di uscita (si esce
+  // sul metatitolo, e si compra proprio nella parte bassa): lì si mostra solo
+  // l'intervallo del canale.
+  const lower = leader.anchoredNow ? leader.anchoredNow.price.lower : null;
+  const toLower = lower != null && lower > 0 ? ((price - lower) / price) * 100 : null;
+
   return (
     <Link
       href={`/world-momentum/${encodeURIComponent(leader.ticker)}?${qs(params)}`}
-      className="glass rounded-2xl p-4 flex flex-col gap-3 transition-colors hover:bg-[var(--surface-2)] cursor-pointer"
-      title={`Apri il dettaglio di ${leader.ticker}: grafici grandi e costruzione dei canali`}
+      className="group glass rounded-2xl p-4 flex flex-col gap-3 border border-transparent transition-all duration-150 hover:border-[var(--accent)] hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)] cursor-pointer"
+      title={`Apri l'analisi completa di ${leader.ticker}: canali, grafici e segnali storici`}
     >
+      {/* Intestazione: chi è, forza, segnale */}
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <span className="font-semibold">{leader.ticker}</span>
+            <span className="font-semibold text-base group-hover:text-[var(--accent)] transition-colors">{leader.ticker}</span>
             {leader.rank > 0 && (
               <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-[var(--surface-2)] text-[var(--muted)]">
-                #{leader.rank} forza
+                #{leader.rank} per forza
               </span>
             )}
           </div>
           <p className="text-xs text-[var(--muted)] truncate">{leader.name}</p>
         </div>
-        <div className="text-right shrink-0">
-          <SignalBadge signal={leader.signal} />
-          <p className="font-mono text-sm mt-1">{money(leader.price)}</p>
+        <SignalBadge signal={leader.signal} />
+      </div>
+
+      {/* Prezzo */}
+      <div className="flex items-end justify-between gap-3">
+        <div>
+          <p className="text-[9px] uppercase tracking-wider text-[var(--muted)] flex items-center gap-1.5">
+            {livePrice ? (
+              <>
+                <span
+                  className={`inline-block size-1.5 rounded-full ${marketOpen ? "live-dot" : ""}`}
+                  style={{ background: marketOpen ? "var(--positive)" : "var(--muted)" }}
+                />
+                {marketOpen ? "prezzo live" : "ultimo prezzo"}
+              </>
+            ) : (
+              "chiusura"
+            )}
+          </p>
+          <p className="font-mono text-2xl leading-tight">
+            <LivePrice price={price} format={(n) => money(n)} />
+          </p>
+        </div>
+        <div className="text-right">
+          <p className="text-[9px] uppercase tracking-wider text-[var(--muted)]">oggi</p>
+          <p className={`font-mono text-sm ${toneOf(dayChg)}`}>{pct(dayChg, 2)}</p>
         </div>
       </div>
+
+      <div className="grid grid-cols-3 gap-2">
+        <MiniStat label="1 mese" value={pct(leader.chg1m)} tone={toneOf(leader.chg1m)} />
+        <MiniStat label="3 mesi" value={pct(leader.chg3m)} tone={toneOf(leader.chg3m)} />
+        <MiniStat label="Forza rel." value={leader.rs.toFixed(1)} tone={toneOf(leader.rs)}
+          hint="Rendimento composito del titolo contro il benchmark (30/90/180 giorni pesati): è il criterio della classifica." />
+      </div>
+
+      {leader.anchoredNow ? (
+        <div className="grid grid-cols-2 gap-2">
+          <ChannelPill label="Metatitolo ÷ benchmark" st={leader.anchoredNow.meta} />
+          <ChannelPill label="Prezzo" st={leader.anchoredNow.price} />
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <p className="text-[9px] uppercase tracking-wider text-[var(--muted)] mb-1">Metatitolo ÷ benchmark</p>
+            <ChannelChart closes={leader.metaSpark} channel={mc} height={48} />
+            <p className="text-[10px] text-[var(--muted)] mt-1 font-mono">R² {mc.r2} · z {mc.z}</p>
+          </div>
+          <div>
+            <p className="text-[9px] uppercase tracking-wider text-[var(--muted)] mb-1">Prezzo</p>
+            {pc ? (
+              <>
+                <ChannelChart closes={leader.priceSpark} channel={pc} height={48} />
+                <p className="text-[10px] text-[var(--muted)] mt-1 font-mono">R² {pc.r2} · z {pc.z}</p>
+              </>
+            ) : (
+              <p className="text-[10px] text-[var(--muted)]">Canale non calcolabile.</p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {lower != null && (
+        <div className="flex items-center justify-between gap-2 text-[11px] rounded-xl border border-[var(--border)] px-2.5 py-1.5"
+          title="La banda inferiore del canale del prezzo: una chiusura sotto questo livello rompe il canale.">
+          <span className="text-[var(--muted)]">Banda inferiore del canale</span>
+          <span className="font-mono">
+            {money(lower)}{" "}
+            {toLower != null && toLower < 0 ? (
+              // Sotto la banda: è una rottura in corso, che conta solo se resta
+              // tale per le chiusure di conferma.
+              <span className="text-[var(--negative)] font-sans">· prezzo sotto la banda, rottura da confermare</span>
+            ) : (
+              <span className={toLower != null && toLower < 3 ? "text-[var(--warning)]" : "text-[var(--muted)]"}>
+                ({toLower != null ? `margine ${toLower.toFixed(1)}%` : "—"})
+              </span>
+            )}
+          </span>
+        </div>
+      )}
+
+      {!leader.anchoredNow && pc && (
+        <div className="flex items-center justify-between gap-2 text-[11px] rounded-xl border border-[var(--border)] px-2.5 py-1.5"
+          title="Bande a ±2σ del canale del prezzo sulle ultime barre: si compra nella metà bassa.">
+          <span className="text-[var(--muted)]">Canale del prezzo</span>
+          <span className="font-mono">{money(leader.channelLow)} – {money(leader.channelHigh)}</span>
+        </div>
+      )}
 
       <p className="text-xs text-[var(--muted)] leading-snug">{leader.reason}</p>
 
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <p className="text-[10px] uppercase tracking-wider text-[var(--muted)] mb-1">
-            Stadio 1 · metatitolo / benchmark
-          </p>
-          <ChannelChart closes={leader.metaSpark} channel={mc} height={54} />
-          <p className="text-[10px] text-[var(--muted)] mt-1 font-mono">
-            R² {mc.r2} · z {mc.z} · RS {leader.rs}
-          </p>
-        </div>
-        <div>
-          <p className="text-[10px] uppercase tracking-wider text-[var(--muted)] mb-1">
-            Stadio 2 · prezzo
-          </p>
-          {pc ? (
-            <>
-              <ChannelChart closes={leader.priceSpark} channel={pc} height={54} />
-              <p className="text-[10px] text-[var(--muted)] mt-1 font-mono">
-                R² {pc.r2} · z {pc.z} · banda {money(leader.channelLow)}–{money(leader.channelHigh)}
-              </p>
-            </>
-          ) : (
-            <p className="text-[10px] text-[var(--muted)]">Canale non calcolabile.</p>
-          )}
-        </div>
-      </div>
-
-      <span className="text-[10px] text-[var(--muted)] mt-auto pt-1">
-        Apri il dettaglio per i grafici grandi →
+      <span className="mt-auto inline-flex items-center justify-center gap-1.5 rounded-xl py-2 text-xs font-medium bg-[var(--surface-2)] text-[var(--foreground)] group-hover:bg-[var(--accent)] group-hover:text-white transition-colors">
+        Apri analisi completa
+        <span className="transition-transform group-hover:translate-x-0.5">→</span>
       </span>
     </Link>
   );
@@ -345,6 +546,12 @@ function AnalysisPanel({ params }: { params: Params }) {
     if (filter === "strong") return data.leaders.filter((l) => l.rank > 0);
     return data.leaders;
   }, [data, filter]);
+
+  // Prezzi live solo per le card a schermo: con la quota Finnhub a pagamento un
+  // aggiornamento ogni 30 secondi per qualche decina di titoli è ampiamente
+  // dentro i limiti, e fuori orario si legge una volta sola (useLivePrices).
+  const liveTickers = useMemo(() => (running ? [] : shown.map((l) => l.ticker)), [shown, running]);
+  const { prices: live, market } = useLivePrices(liveTickers, 30_000);
 
   const counts = useMemo(() => {
     if (!data) return { buy: 0, strong: 0, all: 0 };
@@ -431,7 +638,9 @@ function AnalysisPanel({ params }: { params: Params }) {
             </div>
           ) : (
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {shown.map((l) => <LeaderCard key={l.ticker} leader={l} params={params} />)}
+              {shown.map((l) => (
+                <LeaderCard key={l.ticker} leader={l} params={params} livePrice={live[l.ticker]} marketOpen={market.open} />
+              ))}
             </div>
           )}
         </>
@@ -444,12 +653,14 @@ function AnalysisPanel({ params }: { params: Params }) {
 
 /** Curva equity (mark-to-market) contro il benchmark, e opzionalmente la versione senza protezione. */
 function EquityChart({
-  strategy, bench, base, compare,
+  strategy, bench, base, compare, labels,
 }: {
   strategy: { date: string; equity: number }[];
   bench: { date: string; equity: number }[];
   base: number;
   compare?: { date: string; equity: number }[];
+  /** Nomi delle due linee quando c'è un confronto. */
+  labels?: { strategy: string; compare: string };
 }) {
   if (strategy.length < 2) return null;
   const W = 720, H = 220, PAD = { t: 14, r: 14, b: 26, l: 62 };
@@ -483,8 +694,8 @@ function EquityChart({
       </svg>
       {/* Legenda fuori dal disegno: dentro, finiva sopra i picchi della curva. */}
       <div className="flex flex-wrap gap-x-5 gap-y-1 text-[11px] mt-2 px-1">
-        <span className="flex items-center gap-1.5"><span className="inline-block w-4 h-0.5 bg-[var(--accent)]" />{compare ? "con protezione dai drawdown" : "strategia"}</span>
-        {compare && <span className="flex items-center gap-1.5"><span className="inline-block w-4 h-0.5 bg-[var(--warning)]" />senza protezione</span>}
+        <span className="flex items-center gap-1.5"><span className="inline-block w-4 h-0.5 bg-[var(--accent)]" />{compare ? labels?.strategy ?? "con protezione dai drawdown" : "strategia"}</span>
+        {compare && <span className="flex items-center gap-1.5"><span className="inline-block w-4 h-0.5 bg-[var(--warning)]" />{labels?.compare ?? "senza protezione"}</span>}
         <span className="flex items-center gap-1.5 text-[var(--muted)]"><span className="inline-block w-4 border-t border-dashed border-[var(--muted)]" />benchmark</span>
       </div>
     </div>
@@ -806,6 +1017,7 @@ function TradeLog({
  */
 function ComparisonPanel({ result }: { result: BacktestResult }) {
   const cmp = result.comparison!;
+  const ab = cmp.kind === "previous_strategy";
   const ulcer = (eq: { equity: number }[]) => {
     let peak = -Infinity, sum = 0;
     for (const p of eq) { peak = Math.max(peak, p.equity); const d = ((peak - p.equity) / peak) * 100; sum += d * d; }
@@ -829,26 +1041,47 @@ function ComparisonPanel({ result }: { result: BacktestResult }) {
 
   return (
     <section>
-      <h3 className="text-sm font-semibold mb-1">Con e senza protezione dai drawdown</h3>
-      <p className="text-xs text-[var(--muted)] mb-2 max-w-3xl">
-        Stessi titoli, stessi segnali, stesse date di ingresso e uscita: cambia solo quanto si
-        investe. Con la volatilità della strategia sopra il {result.options.volTarget}% annuo
-        l&apos;esposizione si riduce in proporzione.
-      </p>
+      {ab ? (
+        <>
+          <h3 className="text-sm font-semibold mb-1">A/B — canali ancorati contro la strategia attuale</h3>
+          <p className="text-xs text-[var(--muted)] mb-2 max-w-3xl">
+            Stessi dati, stessa finestra, stessa protezione dai drawdown: cambia solo come si
+            costruiscono i canali e quindi quando si entra e si esce.
+          </p>
+          <p className="text-[11px] text-[var(--muted)] mb-2 max-w-3xl">
+            Validazione su 5 fasi di partenza (mediane), uscita sul metatitolo: 2021-26 S&amp;P 500
+            +194% contro +140%, drawdown 21,9% contro 20,0%; 2013-21 (mai usato per tarare) +781%
+            contro +460%, drawdown 25,3% contro 25,9%; Nasdaq 100 2021-26 +210% contro +159%, ma
+            drawdown 34,2% contro 24,3%. Rende di più in tutti e tre i test, ma sul Nasdaq il rischio
+            peggiora: per questo resta un&apos;alternativa e non il default. La regola alla lettera
+            (uscita sul canale del prezzo) rende meno della strategia attuale in due test su tre.
+          </p>
+        </>
+      ) : (
+        <>
+          <h3 className="text-sm font-semibold mb-1">Con e senza protezione dai drawdown</h3>
+          <p className="text-xs text-[var(--muted)] mb-2 max-w-3xl">
+            Stessi titoli, stessi segnali, stesse date di ingresso e uscita: cambia solo quanto si
+            investe. Con la volatilità della strategia sopra il {result.options.volTarget}% annuo
+            l&apos;esposizione si riduce in proporzione.
+          </p>
+        </>
+      )}
       <p className="text-[11px] text-[var(--muted)] mb-2 max-w-3xl">
         I numeri di un singolo backtest cambiano anche molto spostando l&apos;inizio di un giorno,
         perché cambia quali titoli si comprano all&apos;avvio (soprattutto il peggior PF dei
-        periodi). La riduzione del drawdown invece è stata verificata su tutte e 5 le fasi dello
-        scan, su un periodo mai usato per tarare (2013-2021) e su un altro universo (Nasdaq 100):
-        regge in tutti e 15 i casi.
+        periodi).{" "}
+        {ab
+          ? "Per questo il confronto che conta è quello sulle 5 fasi qui sopra, non il singolo run."
+          : "La riduzione del drawdown invece è stata verificata su tutte e 5 le fasi dello scan, su un periodo mai usato per tarare (2013-2021) e su un altro universo (Nasdaq 100): regge in tutti e 15 i casi."}
       </p>
       <div className="glass rounded-2xl p-4 overflow-x-auto">
         <table className="w-full text-xs [&_th]:pr-4 [&_td]:pr-4 [&_th:last-child]:pr-0 [&_td:last-child]:pr-0">
           <thead>
             <tr className="text-[var(--muted)] text-left">
               <th className="pb-2 font-medium">Metrica</th>
-              <th className="pb-2 font-medium text-right">Senza protezione</th>
-              <th className="pb-2 font-medium text-right">Con protezione</th>
+              <th className="pb-2 font-medium text-right">{ab ? "Strategia attuale" : "Senza protezione"}</th>
+              <th className="pb-2 font-medium text-right">{ab ? "Canali ancorati" : "Con protezione"}</th>
               <th className="pb-2 font-medium text-right">Differenza</th>
             </tr>
           </thead>
@@ -945,7 +1178,8 @@ function BacktestPanel({ params }: { params: Params }) {
           {running ? "Backtest in corso…" : "🧪 Avvia backtest"}
         </button>
         <span className="text-xs text-[var(--muted)]">
-          {params.years} anni · uscita: {EXIT_LABELS[params.exitRule]}
+          {params.years} anni · uscita:{" "}
+          {params.channelMode === "anchored" ? ANCHORED_EXIT_LABELS[params.anchoredExit] : EXIT_LABELS[params.exitRule]}
         </span>
       </div>
 
@@ -997,6 +1231,9 @@ function BacktestPanel({ params }: { params: Params }) {
                 bench={result.benchEquity}
                 base={10_000}
                 compare={result.comparison?.equity}
+                labels={result.comparison?.kind === "previous_strategy"
+                  ? { strategy: "canali ancorati", compare: "strategia attuale" }
+                  : undefined}
               />
             </div>
           </section>
@@ -1011,8 +1248,14 @@ function BacktestPanel({ params }: { params: Params }) {
               <DrawdownChart
                 series={[
                   { label: "benchmark", color: "var(--muted)", eq: result.benchEquity },
-                  ...(result.comparison ? [{ label: "senza protezione", color: "var(--warning)", eq: result.comparison.equity }] : []),
-                  { label: result.comparison ? "con protezione" : "strategia", color: "var(--accent)", eq: result.equity },
+                  ...(result.comparison
+                    ? [{ label: result.comparison.kind === "previous_strategy" ? "strategia attuale" : "senza protezione", color: "var(--warning)", eq: result.comparison.equity }]
+                    : []),
+                  {
+                    label: !result.comparison ? "strategia" : result.comparison.kind === "previous_strategy" ? "canali ancorati" : "con protezione",
+                    color: "var(--accent)",
+                    eq: result.equity,
+                  },
                 ]}
               />
             </div>

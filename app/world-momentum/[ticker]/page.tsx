@@ -7,7 +7,7 @@ import { SyncedTimeChart, type HoldingSpan } from "@/components/SyncedTimeChart"
 import { LoadingPanel } from "@/components/Loading";
 import { money } from "@/lib/format";
 import { runFetchJob, useJob, usePersistentState } from "@/lib/analysisStore";
-import type { WorldTickerDetail, ChannelDetail, TickerSignalHistory } from "@/lib/worldMomentum";
+import type { WorldTickerDetail, ChannelDetail, TickerSignalHistory, AnchoredNow } from "@/lib/worldMomentum";
 
 // ─── Blocchi di spiegazione ──────────────────────────────────────────────────
 
@@ -110,6 +110,30 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: "po
   );
 }
 
+/** Lo stato del canale attivo oggi, in una riga. */
+function NowBadge({ label, now }: { label: string; now: AnchoredNow }) {
+  const color = now.dir === "up" ? "var(--positive)" : now.dir === "down" ? "var(--negative)" : "var(--muted)";
+  const dir = now.dir === "up" ? "rialzista" : now.dir === "down" ? "ribassista" : "laterale";
+  const how =
+    now.cause === "break_up"
+      ? "nato dalla rottura della banda superiore"
+      : now.cause === "break_down"
+      ? "nato dalla rottura della banda inferiore"
+      : now.cause === "widen"
+      ? "nato dall'allargamento del canale precedente"
+      : "primo canale dello storico";
+  return (
+    <div className="rounded-xl bg-[var(--surface-2)] p-3" style={{ borderLeft: `3px solid ${color}` }}>
+      <p className="text-[10px] uppercase tracking-wider text-[var(--muted)]">{label}</p>
+      <p className="text-sm mt-0.5" style={{ color }}>Canale {dir}</p>
+      <p className="text-[11px] text-[var(--muted)] mt-0.5">
+        dal {now.from}, {how}
+        {now.cause !== "start" ? `, confermato il ${now.confirmedAt}` : ""}
+      </p>
+    </div>
+  );
+}
+
 /** Periodo mostrato, in barre di borsa: vale per tutti e tre i grafici insieme. */
 const RANGES = [
   { key: "3M", bars: 63 },
@@ -180,6 +204,22 @@ export default function TickerDetailPage() {
   }, [data, range]);
 
   const metaSeries = useMemo(() => (data ? data.context.map((c) => ({ date: c.date, value: c.meta })) : []), [data]);
+  const anchoredMode = data?.options.channelMode === "anchored";
+
+  // Serie settimanale: suo asse (una data per settimana) ritagliato sullo stesso
+  // periodo, e il cursore giornaliero convertito nella settimana che lo contiene.
+  const weeklySeries = useMemo(
+    () => (data ? data.anchored.weekly.series.map((w) => ({ date: w.date, value: w.close })) : []),
+    [data]
+  );
+  const weeklyDomain = useMemo(
+    () => (domain.length ? weeklySeries.map((w) => w.date).filter((d) => d >= domain[0]) : []),
+    [weeklySeries, domain]
+  );
+  const weeklyHover = useMemo(
+    () => (hoverDate ? weeklyDomain.find((d) => d >= hoverDate) ?? null : null),
+    [hoverDate, weeklyDomain]
+  );
   const priceSeries = useMemo(() => (data ? data.context.map((c) => ({ date: c.date, value: c.close })) : []), [data]);
   const spans = useMemo<HoldingSpan[]>(
     () => (signals ? signals.signals.map((g) => ({ from: g.entryDate, to: g.exitDate, returnPct: g.returnPct })) : []),
@@ -260,11 +300,79 @@ export default function TickerDetailPage() {
               ))}
             </div>
             <span className="text-[11px] text-[var(--muted)]">
-              {domain[0]} → {domain[domain.length - 1]} · i tre grafici condividono asse temporale e cursore
+              {domain[0]} → {domain[domain.length - 1]} · tutti i grafici condividono asse temporale e cursore
             </span>
           </div>
 
+          {/* ── Canali ancorati (come su ProRealTime) ── */}
+          <section className="glass rounded-2xl p-5">
+            <div className="flex items-baseline justify-between gap-3 flex-wrap mb-1">
+              <h2 className="text-lg font-semibold">I canali, tracciati come su ProRealTime</h2>
+              <span className="text-xs text-[var(--muted)]">
+                {anchoredMode ? "è la logica della strategia selezionata" : "vista di confronto: la strategia selezionata usa la finestra mobile"}
+              </span>
+            </div>
+            <p className="text-xs text-[var(--muted)] mb-4 max-w-3xl">
+              Ogni canale è una regressione lineare che parte dal minimo (o massimo) precedente e si
+              allunga finché regge. Muore quando la chiusura esce dalla banda opposta e resta fuori
+              per {data.anchored.options.confirmBars} sedute: lì nasce il canale successivo. Le bande
+              sono a ±{data.anchored.options.bandK}σ; un canale giovane parte con bande a ±
+              {data.anchored.options.maxBandK}σ che si stringono in {data.anchored.options.rampBars}{" "}
+              sedute, così i primi giorni di rumore non lo rompono. Sotto il{" "}
+              {data.anchored.options.minSlopePct}% annuo di pendenza il canale è laterale.
+            </p>
+
+            <div className="grid md:grid-cols-3 gap-3 mb-5">
+              <NowBadge label="Prezzo, giornaliero" now={data.anchored.now.price} />
+              <NowBadge label={`Metatitolo (÷ ${data.benchmark})`} now={data.anchored.now.meta} />
+              <NowBadge label="Prezzo, settimanale" now={data.anchored.now.weekly} />
+            </div>
+
+            <h3 className="text-sm font-semibold mb-1">Prezzo — giornaliero</h3>
+            <SyncedTimeChart
+              domain={domain} series={priceSeries} channels={data.anchored.price}
+              spans={anchoredMode ? spans : undefined} kind="price"
+              hoverDate={hoverDate} onHover={setHoverDate} height={320}
+            />
+            {anchoredMode && (
+              <p className="text-[11px] text-[var(--muted)] mt-1 px-1">
+                ▲ acquisto · ▼ vendita secondo la strategia · ● seduta in cui la nascita del canale è stata confermata
+              </p>
+            )}
+
+            <h3 className="text-sm font-semibold mt-5 mb-1">Metatitolo — {data.ticker} ÷ {data.benchmark}</h3>
+            <p className="text-[11px] text-[var(--muted)] mb-1">
+              Se il canale del metatitolo è rialzista, il titolo sta battendo il benchmark: è la
+              condizione per poter comprare.
+            </p>
+            <SyncedTimeChart
+              domain={domain} series={metaSeries} channels={data.anchored.meta} kind="meta"
+              hoverDate={hoverDate} onHover={setHoverDate} height={240}
+            />
+
+            <h3 className="text-sm font-semibold mt-5 mb-1">Prezzo — settimanale</h3>
+            <p className="text-[11px] text-[var(--muted)] mb-1">
+              Stessa logica sulla chiusura del venerdì: la visione di più lungo periodo, utile
+              quando un canale giornaliero è appena nato.
+            </p>
+            {weeklyDomain.length > 1 ? (
+              <SyncedTimeChart
+                domain={weeklyDomain} series={weeklySeries} channels={data.anchored.weekly.channels} kind="price"
+                hoverDate={weeklyHover} onHover={setHoverDate} height={240}
+              />
+            ) : (
+              <p className="text-xs text-[var(--muted)]">Periodo troppo breve per il settimanale: scegli 6M o più.</p>
+            )}
+
+            <p className="text-[11px] text-[var(--muted)] mt-3 max-w-3xl">
+              Come chi li traccia a mano, ogni canale disegnato è fittato su tutta la sua vita, quindi
+              col senno di poi. Le decisioni della strategia no: in ogni seduta usano solo i prezzi
+              fino a quel giorno, e un canale nuovo conta solo dal pallino in poi.
+            </p>
+          </section>
+
           {/* ── Stadio 1 ── */}
+          {!anchoredMode && (<>
           <section className="glass rounded-2xl p-5">
             <div className="flex items-baseline justify-between gap-3 flex-wrap mb-1">
               <h2 className="text-lg font-semibold">Stadio 1 — il metatitolo</h2>
@@ -362,6 +470,7 @@ export default function TickerDetailPage() {
               <p className="text-sm text-[var(--muted)]">Canale sul prezzo non calcolabile per questo titolo.</p>
             )}
           </section>
+          </>)}
 
           {/* ── Segnali storici ── */}
           <section className="glass rounded-2xl p-5">
@@ -459,6 +568,15 @@ export default function TickerDetailPage() {
 
           <section className="glass rounded-2xl p-5">
             <h2 className="text-sm font-semibold mb-2">Quando si esce, e quanto si investe</h2>
+            {anchoredMode ? (
+            <p className="text-xs text-[var(--muted)] max-w-3xl">
+              {data.options.anchoredExit === "price"
+                ? "La posizione si chiude quando il canale rialzista del prezzo si rompe: chiusura sotto la banda inferiore confermata, canale che si allarga o che perde pendenza. È la regola alla lettera."
+                : data.options.anchoredExit === "price_weekly"
+                ? "La posizione si chiude quando il canale rialzista del prezzo si rompe, ma solo se anche il canale settimanale ha smesso di salire: la vista lunga filtra le rotture di breve."
+                : "La posizione si chiude quando il canale ancorato del metatitolo smette di essere rialzista, cioè quando il titolo smette di battere il benchmark. Nell'A/B è l'uscita che rende di più: quella sul canale del prezzo chiude i vincitori troppo presto."}
+            </p>
+            ) : (
             <p className="text-xs text-[var(--muted)] max-w-3xl">
               La posizione si chiude quando il canale del <strong>metatitolo</strong> si rompe: la
               pendenza smette di essere positiva, oppure l&apos;R² scende sotto{" "}
@@ -466,6 +584,7 @@ export default function TickerDetailPage() {
               forte del mondo — non quando il prezzo fa una gamba storta. Gli stop sul prezzo sono
               stati testati e scartati: riducono poco il drawdown e tagliano i vincitori.
             </p>
+            )}
             <p className="text-xs text-[var(--muted)] max-w-3xl mt-2">
               La protezione dai drawdown agisce a livello di portafoglio, non del singolo titolo:
               quando la volatilità della strategia supera il {data.options.volTarget}% annuo si
