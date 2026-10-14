@@ -134,6 +134,35 @@
  * Non cambia QUALI titoli si comprano né QUANDO: stessi 160 round-trip della
  * baseline. Cambia solo quanto si investe. Le opzioni scartate restano nel
  * motore, spente, perché il risultato sia riproducibile.
+ *
+ * ─── Canali ancorati — A/B contro la strategia attuale (ott 2026) ────────────
+ *
+ * Feedback di Antonio: i canali vanno tracciati come su ProRealTime, con un
+ * inizio (rottura confermata della banda opposta del canale precedente,
+ * ancoraggio al minimo/massimo precedente) e una fine. Implementati in
+ * lib/anchoredChannel.ts e selezionabili con `channelMode: "anchored"`.
+ * Parametri del canale tarati a vista sul suo grafico di PLTR, PRIMA di
+ * guardare qualunque rendimento. Regola di adozione fissata prima dei test: i
+ * canali ancorati diventano il default solo se, in mediana sulle 5 fasi, hanno
+ * Calmar ≥ e rendimento ≥ 90% della strategia attuale in TUTTI e tre i test.
+ *
+ * Mediane su 5 fasi, volTarget 20 per entrambe:
+ *
+ *                           2021-26 SP500     2013-21 SP500     2021-26 NDX
+ *   attuale    rend / DD    139,7 / 20,0      460,0 / 25,9      158,5 / 24,3
+ *   ancorati, uscita meta   193,6 / 21,9      780,9 / 25,3      209,7 / 34,2
+ *   ancorati, uscita prezzo  56,2 / 26,6      609,4 / 19,6      112,6 / 29,9
+ *   Calmar attuale           0,93              0,86              0,99
+ *   Calmar uscita meta       1,04              1,19              0,76  ← boccia
+ *
+ * La regola alla lettera (uscita alla rottura del canale del PREZZO) perde in
+ * 16 varianti su 16 sul set di taratura: esce dopo 15-22 sedute e taglia i
+ * vincitori, come già misurato per `price_band`. L'ibrido — entrata a inizio
+ * canale rialzista del prezzo, uscita alla rottura del canale ancorato del
+ * METAtitolo — rende di più in tutti e tre i test e in tutte le 12 varianti di
+ * plateau (160-222% contro 140%), ma sul Nasdaq il drawdown sale di 10 punti e
+ * il peggior PF per fold è più basso quasi ovunque. Non passa la regola:
+ * resta un'alternativa selezionabile, il default è invariato.
  */
 
 import type { Candle } from "./types";
@@ -141,6 +170,15 @@ import { indexByKey } from "./indices";
 import { nameFor, sectorFor } from "./universe";
 import { fetchCandles } from "./marketData";
 import { regressionChannel, type RegressionChannel } from "./regression";
+import {
+  anchoredChannels,
+  weeklyChannels,
+  DEFAULT_ANCHORED,
+  CAUSE_CODES,
+  type AnchoredChannelOptions,
+  type AnchoredSeries,
+  type ChannelSegment,
+} from "./anchoredChannel";
 import type { BacktestSummary, WalkForwardPeriod, WalkForwardReport } from "./backtest";
 import { walkForwardStats } from "./backtest";
 
@@ -167,6 +205,34 @@ export const EXIT_RULE_LABELS: Record<ExitRule, string> = {
   meta_break: "Canale del metatitolo rotto",
 };
 
+/**
+ * Come si costruiscono i canali:
+ *  - "rolling":  finestra fissa che scorre (sempre le ultime N barre). È la
+ *                strategia validata a settembre: entrata a z ≤ 0 dentro un
+ *                canale ascendente, uscita sulla rottura del metatitolo.
+ *  - "anchored": canali con un inizio e una fine, tracciati come li traccia
+ *                Antonio (lib/anchoredChannel.ts). Si compra quando nasce un
+ *                canale rialzista sul prezzo di un titolo il cui metatitolo è a
+ *                sua volta in canale rialzista; si vende quando il canale del
+ *                prezzo si rompe.
+ */
+export type ChannelMode = "rolling" | "anchored";
+
+/**
+ * Ancorati — quando si vende:
+ *  - "price":        il canale giornaliero del prezzo non è più rialzista (la
+ *                    regola di Antonio alla lettera)
+ *  - "price_weekly": come "price", ma solo se anche il canale SETTIMANALE non
+ *                    è più rialzista: la vista lunga filtra le rotture di breve
+ *  - "meta":         il canale ancorato del metatitolo non è più rialzista
+ *  - "meta_rolling": l'uscita della strategia precedente (rottura del canale
+ *                    mobile del metatitolo), con l'entrata dei canali ancorati
+ */
+export type AnchoredExit = "price" | "price_weekly" | "meta" | "meta_rolling";
+
+/** Conferma dal canale settimanale del prezzo, al momento dell'entrata. */
+export type WeeklyFilter = "off" | "not_down" | "up";
+
 export interface WorldMomentumOptions {
   indexKey: string;
   startDate: string;
@@ -188,6 +254,17 @@ export interface WorldMomentumOptions {
   /** Stadio 2: si entra solo con z ≤ questo ("inizio del canale"). */
   entryMaxZ?: number;
   exitRule?: ExitRule;
+  channelMode?: ChannelMode;
+  /** Parametri dei canali ancorati (solo channelMode "anchored"). */
+  anchored?: Partial<AnchoredChannelOptions>;
+  /** Ancorati: conferma richiesta al canale settimanale all'entrata. */
+  weeklyFilter?: WeeklyFilter;
+  /** Ancorati: si esce anche quando il metatitolo esce dal canale rialzista. */
+  exitOnMeta?: boolean;
+  /** Ancorati: quale rottura chiude la posizione. */
+  anchoredExit?: AnchoredExit;
+  /** Ancorati: si entra solo entro N barre dalla nascita del canale (0 = in qualunque momento). */
+  maxEntryAge?: number;
   /**
    * Filtro di regime: niente NUOVE entrate mentre il benchmark è sotto la sua
    * SMA(regimeSma). Le posizioni aperte seguono comunque la regola di uscita —
@@ -240,7 +317,9 @@ export interface WorldMomentumOptions {
   w180?: number;
 }
 
-export type ResolvedWorldOptions = Required<WorldMomentumOptions>;
+export type ResolvedWorldOptions = Required<Omit<WorldMomentumOptions, "anchored">> & {
+  anchored: AnchoredChannelOptions;
+};
 
 /**
  * Perché si è chiusa (in tutto o in parte) una posizione:
@@ -303,11 +382,16 @@ export interface WorldMomentumResult {
   rankingHistory: RankingSnapshot[];
   walkForward?: WalkForwardReport;
   /**
-   * La stessa strategia SENZA volatility targeting, simulata sugli stessi dati
-   * e la stessa finestra: è il termine di paragone per misurare quanto rischio
-   * toglie la protezione e quanto rendimento costa. Assente se volTarget = 0.
+   * Il termine di paragone, simulato sugli stessi dati e la stessa finestra:
+   *  - con i canali ancorati, la strategia PRECEDENTE (canali a finestra
+   *    mobile, stessa protezione) — è l'A/B che decide se cambiare strategia;
+   *  - con i canali a finestra mobile, la stessa strategia senza volatility
+   *    targeting — misura quanto rischio toglie la protezione.
+   * Assente se non c'è niente da confrontare (finestra mobile e volTarget 0).
    */
   comparison?: {
+    kind: "previous_strategy" | "no_vol_target";
+    label: string;
     summary: BacktestSummary;
     equity: { date: string; equity: number }[];
     walkForward?: WalkForwardReport;
@@ -547,6 +631,84 @@ function windowAt(series: number[], endIdx: number, size: number): number[] | nu
   return slice.some((v) => !isFinite(v)) ? null : slice;
 }
 
+// ─── Canali ancorati: stato e regole, condivisi da backtest, analisi e replay ──
+
+/** I tre canali ancorati di un titolo: prezzo, metatitolo e prezzo settimanale. */
+export interface AnchoredSet {
+  price: AnchoredSeries;
+  meta: AnchoredSeries;
+  /** Direzione del canale settimanale all'ultima settimana chiusa, per barra giornaliera. */
+  weeklyDir: Int8Array;
+}
+
+export function buildAnchoredSet(
+  dates: string[],
+  closes: number[],
+  meta: number[],
+  o: AnchoredChannelOptions
+): AnchoredSet {
+  return {
+    price: anchoredChannels(closes, o),
+    meta: anchoredChannels(meta, o),
+    weeklyDir: weeklyChannels(dates, closes, o).dailyDir,
+  };
+}
+
+/** Il metatitolo è in canale rialzista: il titolo sta battendo il benchmark. */
+export function anchoredStrong(set: AnchoredSet, i: number): boolean {
+  return set.meta.dir[i] > 0;
+}
+
+/**
+ * Si può comprare alla barra i? Null = sì, altrimenti il motivo per cui no.
+ * Il metatitolo si controlla a parte (stadio 1).
+ */
+export function anchoredEntryBlock(set: AnchoredSet, i: number, o: ResolvedWorldOptions): string | null {
+  const p = set.price;
+  if (p.dir[i] <= 0) {
+    return p.dir[i] < 0 ? "il prezzo è in un canale ribassista" : "il prezzo è in un canale laterale";
+  }
+  const age = i - p.birth[i];
+  if (o.maxEntryAge > 0 && age > o.maxEntryAge) {
+    return `il canale rialzista è nato ${age} sedute fa: troppo tardi per entrare`;
+  }
+  if (o.weeklyFilter === "not_down" && set.weeklyDir[i] < 0) return "il canale settimanale è ribassista";
+  if (o.weeklyFilter === "up" && set.weeklyDir[i] <= 0) return "il canale settimanale non è rialzista";
+  return null;
+}
+
+/**
+ * Si deve vendere alla barra i? Null = no, altrimenti il motivo. Con
+ * `anchoredExit` "meta_rolling" la decisione è del canale mobile e la prende il
+ * chiamante: qui risponde sempre null.
+ */
+export function anchoredExitReason(set: AnchoredSet, i: number, o: ResolvedWorldOptions): string | null {
+  if (o.anchoredExit === "meta_rolling") return null;
+  if (o.anchoredExit === "meta") {
+    return set.meta.dir[i] <= 0 ? "il metatitolo è uscito dal canale rialzista" : null;
+  }
+  const p = set.price;
+  if (o.anchoredExit === "price_weekly" && set.weeklyDir[i] > 0) {
+    // Il settimanale è ancora rialzista: la rottura giornaliera non basta.
+    return o.exitOnMeta && set.meta.dir[i] <= 0 ? "il metatitolo è uscito dal canale rialzista" : null;
+  }
+  if (p.dir[i] <= 0) {
+    const cause = CAUSE_CODES[p.cause[i]];
+    if (cause === "break_down") return "rottura confermata della banda inferiore del canale";
+    if (cause === "widen") return "il canale si è allargato: non segue più i prezzi";
+    return p.dir[i] < 0 ? "il canale del prezzo è diventato ribassista" : "il canale ha perso pendenza: laterale";
+  }
+  if (o.exitOnMeta && set.meta.dir[i] <= 0) return "il metatitolo è uscito dal canale rialzista";
+  return null;
+}
+
+/** Posizione dentro il canale ancorato in unità di deviazione standard (come lo z del canale mobile). */
+function anchoredZ(s: AnchoredSeries, i: number, value: number, k: number): number {
+  const half = s.upper[i] - s.mid[i];
+  if (!(half > 0)) return 0;
+  return +(((value - s.mid[i]) / half) * k).toFixed(2);
+}
+
 async function pool<T, R>(items: T[], limit: number, fn: (i: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
   let idx = 0;
@@ -673,12 +835,27 @@ interface SimOutput {
  */
 type ChannelCache = Map<string, RegressionChannel | null>;
 
+/** Stessa idea per i canali ancorati: dipendono da serie e parametri del canale, non dal portafoglio. */
+type AnchoredCache = Map<string, AnchoredSet>;
+
+function anchoredSetFor(td: TickerData, o: ResolvedWorldOptions, cache: AnchoredCache): AnchoredSet {
+  const key = `${td.ticker}|${JSON.stringify(o.anchored)}`;
+  let set = cache.get(key);
+  if (!set) {
+    set = buildAnchoredSet(td.candles.map((c) => c.date), td.closes, td.meta, o.anchored);
+    cache.set(key, set);
+  }
+  return set;
+}
+
 function simulate(
   allData: TickerData[],
   benchCandles: Candle[],
   opts: ResolvedWorldOptions,
-  cache: ChannelCache = new Map()
+  cache: ChannelCache = new Map(),
+  anchCache: AnchoredCache = new Map()
 ): SimOutput {
+  const anchored = opts.channelMode === "anchored";
   const slip = opts.slippageBps / 10_000;
   const dates = benchCandles
     .filter((c) => c.date >= opts.startDate && c.date <= opts.endDate)
@@ -783,7 +960,9 @@ function simulate(
       }
 
       let outcome: WorldExitKind | null = null;
-      switch (opts.exitRule) {
+      if (anchored && opts.anchoredExit !== "meta_rolling") {
+        if (anchoredExitReason(anchoredSetFor(td, opts, anchCache), barIdx, opts)) outcome = "channel_break";
+      } else switch (anchored ? "meta_break" : opts.exitRule) {
         case "price_band": {
           // Il canale si rifitta ogni giorno: la banda inferiore si muove con
           // il trend. Uscita sul close, non intrabarra — la banda è un livello
@@ -887,6 +1066,19 @@ function simulate(
     for (const td of allData) {
       const barIdx = td.dateIdx.get(date);
       if (barIdx == null) continue;
+      if (anchored) {
+        const set = anchoredSetFor(td, opts, anchCache);
+        if (!anchoredStrong(set, barIdx)) continue;
+        const rs = rsComposite(td.meta, barIdx, opts.w30, opts.w90, opts.w180);
+        if (!isFinite(rs)) continue;
+        strong.push({
+          ticker: td.ticker,
+          rs: +rs.toFixed(2),
+          metaR2: 0,
+          metaZ: anchoredZ(set.meta, barIdx, td.meta[barIdx], opts.anchored.bandK),
+        });
+        continue;
+      }
       const metaCh = metaChannelAt(td, barIdx);
       if (!metaCh || metaCh.trend !== "asc" || metaCh.r2 < opts.minMetaR2) continue;
       const rs = rsComposite(td.meta, barIdx, opts.w30, opts.w90, opts.w180);
@@ -915,6 +1107,15 @@ function simulate(
       const td = dataByTicker.get(s.ticker)!;
       const barIdx = td.dateIdx.get(date);
       if (barIdx == null) continue;
+
+      if (anchored) {
+        const set = anchoredSetFor(td, opts, anchCache);
+        if (set.price.dir[barIdx] <= 0) continue;
+        signalsTotal++;
+        if (anchoredEntryBlock(set, barIdx, opts)) continue;
+        entries.push({ ticker: s.ticker, rs: s.rs });
+        continue;
+      }
 
       const priceCh = priceChannelAt(td, barIdx);
       if (!priceCh || priceCh.trend !== "asc" || priceCh.r2 < opts.minPriceR2) continue;
@@ -1074,6 +1275,14 @@ export interface WorldLeader {
   /** Serie per i grafici, allineate alla finestra del rispettivo canale. */
   priceSpark: number[];
   metaSpark: number[];
+  /** Canali ancorati attivi oggi (solo con channelMode "anchored"). */
+  anchoredNow?: { price: AnchoredNow; meta: AnchoredNow };
+  /** Data dell'ultima barra e chiusura precedente: servono a calcolare la variazione del giorno col prezzo live. */
+  lastDate: string;
+  prevClose: number;
+  /** Variazione del prezzo a 1 e 3 mesi (21 e 63 sedute), in %. */
+  chg1m: number | null;
+  chg3m: number | null;
 }
 
 export interface WorldAnalysis {
@@ -1168,8 +1377,28 @@ export async function runWorldAnalysis(
     const priceChannel = priceWin ? regressionChannel(priceWin, 2) : null;
     const rs = rsComposite(meta, last, opts.w30, opts.w90, opts.w180);
 
+    // Canali ancorati: stessa funzione del backtest, sugli stessi 2 anni. Lo
+    // stato dipende dal percorso, ma converge alla prima rottura confermata
+    // (l'ancora nuova si cerca solo nelle ultime `pivotLookback` barre), quindi
+    // dopo pochi mesi coincide con quello calcolato su uno storico più lungo.
+    let anch: { set: AnchoredSet; now: { price: AnchoredNow; meta: AnchoredNow } } | null = null;
+    if (opts.channelMode === "anchored") {
+      const dates = candles.map((c) => c.date);
+      const set = buildAnchoredSet(dates, closes, meta, opts.anchored);
+      anch = { set, now: { price: anchoredNow(set.price, dates, last), meta: anchoredNow(set.meta, dates, last) } };
+    }
+
+    const chg = (bars: number) =>
+      last - bars >= 0 && closes[last - bars] > 0 ? +(((closes[last] / closes[last - bars]) - 1) * 100).toFixed(1) : null;
+
     return {
       ticker,
+      anch,
+      last,
+      lastDate: candles[last].date,
+      prevClose: last > 0 ? closes[last - 1] : closes[last],
+      chg1m: chg(21),
+      chg3m: chg(63),
       price: closes[last],
       rs: isFinite(rs) ? rs : -Infinity,
       metaChannel,
@@ -1203,8 +1432,10 @@ export async function runWorldAnalysis(
   })();
 
   // ── Stadio 1: chi batte il benchmark.
+  const isStrongRow = (r: (typeof rows)[number]) =>
+    r.anch ? anchoredStrong(r.anch.set, r.last) : r.metaChannel.trend === "asc" && r.metaChannel.r2 >= opts.minMetaR2;
   const strong = rows
-    .filter((r) => r.metaChannel.trend === "asc" && r.metaChannel.r2 >= opts.minMetaR2 && isFinite(r.rs))
+    .filter((r) => isStrongRow(r) && isFinite(r.rs))
     .sort((a, b) => b.rs - a.rs)
     .slice(0, opts.strongTopN);
   const strongSet = new Map(strong.map((r, i) => [r.ticker, i + 1]));
@@ -1217,7 +1448,20 @@ export async function runWorldAnalysis(
       let signal: WorldLeader["signal"] = "DEBOLE";
       let reason: string;
 
-      if (!rank) {
+      if (r.anch) {
+        const block = anchoredEntryBlock(r.anch.set, r.last, opts);
+        if (!rank) {
+          reason = !anchoredStrong(r.anch.set, r.last)
+            ? "Il metatitolo non è in un canale rialzista: non batte il benchmark."
+            : `Fuori dai primi ${opts.strongTopN} per forza relativa.`;
+        } else if (block) {
+          signal = "ATTENDI";
+          reason = `Forte sul benchmark (#${rank}), ma ${block}.`;
+        } else {
+          signal = "COMPRA";
+          reason = `Forte sul benchmark (#${rank}) e prezzo in un canale rialzista confermato il ${r.anch.now.price.confirmedAt}.`;
+        }
+      } else if (!rank) {
         reason =
           r.metaChannel.trend !== "asc"
             ? "Il metatitolo non è in canale ascendente: non batte il benchmark."
@@ -1259,6 +1503,11 @@ export async function runWorldAnalysis(
         channelHigh: pc ? +pc.upperNow.toFixed(2) : 0,
         priceSpark: r.priceSpark,
         metaSpark: r.metaSpark,
+        anchoredNow: r.anch?.now,
+        lastDate: r.lastDate,
+        prevClose: +r.prevClose.toFixed(2),
+        chg1m: r.chg1m,
+        chg3m: r.chg3m,
       };
     })
     // COMPRA prima, poi ATTENDI per rango, poi i deboli per RS.
@@ -1279,6 +1528,101 @@ export async function runWorldAnalysis(
     exposure,
     leaders,
     options: opts,
+  };
+}
+
+// ─── Canali ancorati da disegnare ────────────────────────────────────────────
+
+/** Un canale ancorato pronto per il grafico: due estremi e una banda costante. */
+export interface DrawnChannel {
+  from: string;
+  to: string;
+  /** Seduta in cui la nascita del canale è stata confermata. */
+  confirmedAt: string;
+  dir: "up" | "down" | "flat";
+  cause: "start" | "break_up" | "break_down" | "widen";
+  endReason: "break_up" | "break_down" | "widen" | "open";
+  /** Retta: mid(i) = startMid + slope × (barre da `from`). */
+  startMid: number;
+  slope: number;
+  /** Semi-ampiezza della banda (k × σ). */
+  band: number;
+  k: number;
+  slopePct: number;
+  r2: number;
+}
+
+export function drawnChannels(segments: ChannelSegment[], dates: string[]): DrawnChannel[] {
+  return segments.map((g) => ({
+    from: dates[g.start],
+    to: dates[g.end],
+    confirmedAt: dates[g.confirmedAt],
+    dir: g.dir,
+    cause: g.cause,
+    endReason: g.endReason,
+    startMid: g.intercept,
+    slope: g.slope,
+    band: g.k * g.stdev,
+    k: +g.k.toFixed(2),
+    slopePct: g.slopePct,
+    r2: g.r2,
+  }));
+}
+
+/** Stato del canale attivo oggi, in parole e date. */
+export interface AnchoredNow {
+  dir: "up" | "down" | "flat";
+  /** Da quando c'è il canale attivo (ancora) e da quando lo si sapeva (conferma). */
+  from: string;
+  confirmedAt: string;
+  cause: "start" | "break_up" | "break_down" | "widen";
+  /** Sedute dalla conferma del canale a oggi. */
+  age: number;
+  /** Bande del canale proiettate su oggi (null se il canale è troppo giovane). */
+  lower: number | null;
+  upper: number | null;
+}
+
+function anchoredNow(s: AnchoredSeries, dates: string[], i: number): AnchoredNow {
+  const band = (v: number) => (isFinite(v) ? +v.toFixed(6) : null);
+  return {
+    dir: s.dir[i] > 0 ? "up" : s.dir[i] < 0 ? "down" : "flat",
+    from: dates[Math.max(0, s.anchor[i])],
+    confirmedAt: dates[Math.max(0, s.birth[i])],
+    cause: CAUSE_CODES[s.cause[i]],
+    age: Math.max(0, i - s.birth[i]),
+    lower: band(s.lower[i]),
+    upper: band(s.upper[i]),
+  };
+}
+
+/** I canali ancorati di un titolo: prezzo e metatitolo giornalieri, prezzo settimanale. */
+export interface AnchoredView {
+  price: DrawnChannel[];
+  meta: DrawnChannel[];
+  weekly: { series: { date: string; close: number }[]; channels: DrawnChannel[] };
+  now: { price: AnchoredNow; meta: AnchoredNow; weekly: AnchoredNow };
+  options: AnchoredChannelOptions;
+}
+
+export function anchoredView(dates: string[], closes: number[], meta: number[], o: AnchoredChannelOptions): AnchoredView {
+  const price = anchoredChannels(closes, o);
+  const metaCh = anchoredChannels(meta, o);
+  const weekly = weeklyChannels(dates, closes, o);
+  const last = dates.length - 1;
+  return {
+    price: drawnChannels(price.segments, dates),
+    meta: drawnChannels(metaCh.segments, dates),
+    weekly: {
+      series: weekly.dates.map((d, i) => ({ date: d, close: +weekly.closes[i].toFixed(2) })),
+      channels: drawnChannels(weekly.channels.segments, weekly.dates),
+    },
+    now: {
+      price: anchoredNow(price, dates, last),
+      meta: anchoredNow(metaCh, dates, last),
+      weekly: anchoredNow(weekly.channels, weekly.dates, weekly.dates.length - 1),
+    },
+    options: o,
   };
 }
 
@@ -1329,6 +1673,8 @@ export interface WorldTickerDetail {
   reason: string;
   /** Tutto lo storico allineato (prezzo e metatitolo): l'asse condiviso dei grafici. */
   context: { date: string; close: number; meta: number }[];
+  /** I canali ancorati (come li traccia Antonio), sempre calcolati: servono ai grafici. */
+  anchored: AnchoredView;
   regimeOk: boolean;
   regimeNote: string;
   options: ResolvedWorldOptions;
@@ -1436,10 +1782,27 @@ export async function runWorldTickerDetail(
 
   const mc = metaDetail.channel;
   const isStrong = mc.trend === "asc" && mc.r2 >= opts.minMetaR2;
+  const anchored = anchoredView(dates, closes, meta, opts.anchored);
 
   let signal: WorldTickerDetail["signal"] = "DEBOLE";
   let reason: string;
-  if (!isStrong) {
+  if (opts.channelMode === "anchored") {
+    const set = buildAnchoredSet(dates, closes, meta, opts.anchored);
+    const block = anchoredEntryBlock(set, last, opts);
+    const n = anchored.now;
+    if (!anchoredStrong(set, last)) {
+      reason = "Il metatitolo non è in un canale rialzista: il titolo non sta battendo il benchmark.";
+    } else if (block) {
+      signal = "ATTENDI";
+      reason = `Batte il benchmark (canale del metatitolo rialzista dal ${n.meta.from}), ma ${block}.`;
+    } else if (!regimeOk) {
+      signal = "ATTENDI";
+      reason = `Setup valido ma il regime è negativo: ${opts.benchmark} sotto la SMA${opts.regimeSma}.`;
+    } else {
+      signal = "COMPRA";
+      reason = `Metatitolo in canale rialzista dal ${n.meta.from} e prezzo in un canale rialzista confermato il ${n.price.confirmedAt}.`;
+    }
+  } else if (!isStrong) {
     reason =
       mc.trend !== "asc"
         ? "Il metatitolo non è in canale ascendente: non batte il benchmark."
@@ -1488,6 +1851,7 @@ export async function runWorldTickerDetail(
     signal,
     reason,
     context,
+    anchored,
     regimeOk,
     regimeNote,
     options: opts,
@@ -1570,13 +1934,19 @@ export function replayTickerSignals(
 
   const signals: TickerSignal[] = [];
   let open: { bar: number; date: string; price: number } | null = null;
+  const anchored = opts.channelMode === "anchored";
+  const set = anchored ? buildAnchoredSet(dates, closes, meta, opts.anchored) : null;
 
   for (let i = startBar; i < n; i++) {
     // ── Uscita: valutata ogni barra, come nel motore di portafoglio.
     if (open && i > open.bar) {
       let exit = false;
       let reason = "";
-      switch (opts.exitRule) {
+      const why = set ? anchoredExitReason(set, i, opts) : null;
+      if (why) {
+        exit = true;
+        reason = why;
+      } else if (!set || opts.anchoredExit === "meta_rolling") switch (set ? "meta_break" : opts.exitRule) {
         case "price_band": {
           const ch = priceChAt(i);
           if (ch && closes[i] < ch.lowerNow) {
@@ -1630,11 +2000,15 @@ export function replayTickerSignals(
     if (open || i % opts.scanFreq !== 0) continue;
     if (opts.useRegime && regimeOk.get(dates[i]) === false) continue;
 
-    const mc = metaChAt(i);
-    if (!mc || mc.trend !== "asc" || mc.r2 < opts.minMetaR2) continue;
-    const pc = priceChAt(i);
-    if (!pc || pc.trend !== "asc" || pc.r2 < opts.minPriceR2) continue;
-    if (pc.z > opts.entryMaxZ) continue;
+    if (set) {
+      if (!anchoredStrong(set, i) || anchoredEntryBlock(set, i, opts)) continue;
+    } else {
+      const mc = metaChAt(i);
+      if (!mc || mc.trend !== "asc" || mc.r2 < opts.minMetaR2) continue;
+      const pc = priceChAt(i);
+      if (!pc || pc.trend !== "asc" || pc.r2 < opts.minPriceR2) continue;
+      if (pc.z > opts.entryMaxZ) continue;
+    }
 
     const next = i + 1;
     if (next >= n) break;
@@ -1779,6 +2153,14 @@ export function resolveWorldOptions(opts: WorldMomentumOptions): ResolvedWorldOp
     regimeExit: opts.regimeExit ?? false,
     regimeHysteresisPct: opts.regimeHysteresisPct ?? 0,
     maxCorr: opts.maxCorr ?? 0,
+    channelMode: opts.channelMode ?? "rolling",
+    anchored: { ...DEFAULT_ANCHORED, ...(opts.anchored ?? {}) },
+    weeklyFilter: opts.weeklyFilter ?? "off",
+    exitOnMeta: opts.exitOnMeta ?? false,
+    // Fra le uscite dei canali ancorati, quella sul metatitolo è l'unica che batte
+    // la strategia precedente sul set di taratura (A/B nell'intestazione).
+    anchoredExit: opts.anchoredExit ?? "meta",
+    maxEntryAge: opts.maxEntryAge ?? 0,
     maxPerSector: opts.maxPerSector ?? 0,
     // Adottato dopo la validazione (intestazione del modulo): l'unico
     // meccanismo che taglia il drawdown nel campione E fuori campione.
@@ -1789,6 +2171,21 @@ export function resolveWorldOptions(opts: WorldMomentumOptions): ResolvedWorldOp
     w30: opts.w30 ?? 0.2,
     w90: opts.w90 ?? 0.5,
     w180: opts.w180 ?? 0.3,
+  };
+}
+
+/**
+ * Modalità dei canali dai query param delle route: valori sconosciuti → default.
+ * Un solo parser per tutte le route, così analisi, dettaglio, storico segnali e
+ * backtest leggono la stessa cosa.
+ */
+export function channelParams(sp: URLSearchParams): { channelMode: ChannelMode; anchoredExit: AnchoredExit } {
+  const mode = sp.get("channelMode");
+  const exit = sp.get("anchoredExit");
+  const EXITS: AnchoredExit[] = ["price", "price_weekly", "meta", "meta_rolling"];
+  return {
+    channelMode: mode === "anchored" ? "anchored" : "rolling",
+    anchoredExit: EXITS.includes(exit as AnchoredExit) ? (exit as AnchoredExit) : "meta",
   };
 }
 
@@ -1838,7 +2235,8 @@ export async function runWorldMomentum(
   if (allData.length === 0) throw new Error("Nessun titolo con dati sufficienti");
 
   const cache: ChannelCache = new Map();
-  const full = simulate(allData, benchCandles, opts, cache);
+  const anchCache: AnchoredCache = new Map();
+  const full = simulate(allData, benchCandles, opts, cache, anchCache);
 
   // Benchmark buy & hold sulla stessa finestra.
   const inWindow = benchCandles.filter((c) => c.date >= opts.startDate && c.date <= opts.endDate);
@@ -1857,7 +2255,7 @@ export async function runWorldMomentum(
     for (let i = 0; i < o.folds; i++) {
       const s0 = new Date(t0 + step * i).toISOString().slice(0, 10);
       const e0 = new Date(t0 + step * (i + 1)).toISOString().slice(0, 10);
-      const r = simulate(allData, benchCandles, { ...o, startDate: s0, endDate: e0 }, cache);
+      const r = simulate(allData, benchCandles, { ...o, startDate: s0, endDate: e0 }, cache, anchCache);
       periods.push({ start: s0, end: e0, summary: r.summary });
     }
     return walkForwardStats(periods);
@@ -1866,10 +2264,28 @@ export async function runWorldMomentum(
   const walkForward = walkForwardOf(opts);
 
   let comparison: WorldMomentumResult["comparison"];
-  if (opts.volTarget > 0) {
+  if (opts.channelMode === "anchored") {
+    // L'A/B: stessi dati, stessa finestra, stessa protezione dal drawdown —
+    // cambia SOLO come si costruiscono i canali.
+    const prev: ResolvedWorldOptions = { ...opts, channelMode: "rolling" };
+    const r = simulate(allData, benchCandles, prev, cache, anchCache);
+    comparison = {
+      kind: "previous_strategy",
+      label: "strategia precedente",
+      summary: r.summary,
+      equity: r.equity,
+      walkForward: walkForwardOf(prev),
+    };
+  } else if (opts.volTarget > 0) {
     const bare = { ...opts, volTarget: 0 };
-    const r = simulate(allData, benchCandles, bare, cache);
-    comparison = { summary: r.summary, equity: r.equity, walkForward: walkForwardOf(bare) };
+    const r = simulate(allData, benchCandles, bare, cache, anchCache);
+    comparison = {
+      kind: "no_vol_target",
+      label: "senza protezione",
+      summary: r.summary,
+      equity: r.equity,
+      walkForward: walkForwardOf(bare),
+    };
   }
 
   return {

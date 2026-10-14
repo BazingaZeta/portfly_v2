@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runWorldMomentum, WORLD_BENCHMARK_INCEPTION, type ExitRule } from "@/lib/worldMomentum";
+import { runWorldMomentum, channelParams, WORLD_BENCHMARK_INCEPTION, type ExitRule } from "@/lib/worldMomentum";
 import { getSession } from "@/lib/auth";
 
 export const runtime = "nodejs";
@@ -39,6 +39,7 @@ export async function GET(req: NextRequest) {
       startDate,
       endDate: end.toISOString().slice(0, 10),
       exitRule,
+      ...channelParams(req.nextUrl.searchParams),
       accountSize: num(req, "accountSize", 10_000),
       maxPositions: num(req, "maxPositions", 5),
       metaWindow: num(req, "metaWindow", 60),

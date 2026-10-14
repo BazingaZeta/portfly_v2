@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runTickerSignalHistory } from "@/lib/worldMomentum";
+import { runTickerSignalHistory, channelParams } from "@/lib/worldMomentum";
 import { getSession } from "@/lib/auth";
 import type { ExitRule } from "@/lib/worldMomentum";
 
@@ -33,6 +33,7 @@ export async function GET(req: NextRequest) {
       indexKey: req.nextUrl.searchParams.get("index") ?? "SP500",
       years: num(req, "years", 5),
       exitRule,
+      ...channelParams(req.nextUrl.searchParams),
       metaWindow: num(req, "metaWindow", 60),
       minMetaR2: num(req, "minMetaR2", 0.5),
       priceWindow: num(req, "priceWindow", 40),

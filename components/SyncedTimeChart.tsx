@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useRef } from "react";
-import type { ChannelPoint } from "@/lib/worldMomentum";
+import type { ChannelPoint, DrawnChannel } from "@/lib/worldMomentum";
 
 /** Un periodo di possesso da ombreggiare, con i marcatori di ingresso e uscita. */
 export interface HoldingSpan {
@@ -20,11 +20,17 @@ export interface HoldingSpan {
  *
  * Il canale di regressione, se c'è, viene disegnato solo sulle date su cui è
  * stato fittato: si vede dove comincia la finestra e cosa resta fuori.
+ *
+ * I canali ancorati (`channels`) si disegnano come su ProRealTime: metà
+ * superiore verde, metà inferiore rossa, retta centrale tratteggiata, bordi
+ * del colore della direzione. Il pallino segna la seduta in cui la nascita del
+ * canale è stata confermata — da lì in poi lo si sapeva davvero.
  */
 export function SyncedTimeChart({
   domain,
   series,
   channel,
+  channels,
   entryMaxZ,
   spans,
   kind,
@@ -35,6 +41,7 @@ export function SyncedTimeChart({
   domain: string[];
   series: { date: string; value: number }[];
   channel?: ChannelPoint[];
+  channels?: DrawnChannel[];
   entryMaxZ?: number;
   spans?: HoldingSpan[];
   kind: "price" | "meta";
@@ -61,17 +68,49 @@ export function SyncedTimeChart({
   const visible = useMemo(() => series.filter((p) => idx.has(p.date)), [series, idx]);
   const visibleCh = useMemo(() => (channel ?? []).filter((p) => idx.has(p.date)), [channel, idx]);
 
+  // Canali ancorati ritagliati sul periodo mostrato. La retta è lineare
+  // nell'indice di barra della serie, quindi bastano i due estremi.
+  const anchored = useMemo(() => {
+    if (!channels?.length || domain.length < 2) return [];
+    const g = new Map(series.map((p, i) => [p.date, i]));
+    const first = domain[0];
+    const last = domain[domain.length - 1];
+    return channels
+      .map((c) => {
+        if (c.to < first || c.from > last) return null;
+        const a = c.from < first ? first : c.from;
+        const b = c.to > last ? last : c.to;
+        const ga = g.get(a), gb = g.get(b), g0 = g.get(c.from);
+        if (ga == null || gb == null || g0 == null || !idx.has(a) || !idx.has(b)) return null;
+        const midA = c.startMid + c.slope * (ga - g0);
+        const midB = c.startMid + c.slope * (gb - g0);
+        return { c, a, b, midA, midB, confirmedVisible: c.cause !== "start" && idx.has(c.confirmedAt) };
+      })
+      .filter((v): v is NonNullable<typeof v> => v !== null);
+  }, [channels, series, domain, idx]);
+
   const { min, max } = useMemo(() => {
     const vals = [
       ...visible.map((p) => p.value),
       ...visibleCh.flatMap((p) => [p.upper, p.lower]),
     ].filter((v) => isFinite(v));
     if (!vals.length) return { min: 0, max: 1 };
-    const lo = Math.min(...vals);
-    const hi = Math.max(...vals);
+    let lo = Math.min(...vals);
+    let hi = Math.max(...vals);
+    // I canali ancorati allargano la scala, ma al massimo di metà dell'escursione
+    // dei prezzi per lato: un canale molto largo non deve schiacciare il grafico
+    // (quello che esce dall'area viene ritagliato).
+    const span = hi - lo;
+    for (const s of anchored) {
+      for (const v of [s.midA + s.c.band, s.midA - s.c.band, s.midB + s.c.band, s.midB - s.c.band]) {
+        if (!isFinite(v)) continue;
+        lo = Math.min(lo, Math.max(v, Math.min(...vals) - span * 0.5));
+        hi = Math.max(hi, Math.min(v, Math.max(...vals) + span * 0.5));
+      }
+    }
     const pad = (hi - lo) * 0.06 || Math.abs(hi) * 0.01 || 1;
     return { min: lo - pad, max: hi + pad };
-  }, [visible, visibleCh]);
+  }, [visible, visibleCh, anchored]);
 
   if (n < 2 || visible.length < 2) return null;
 
@@ -132,6 +171,15 @@ export function SyncedTimeChart({
   const hvValue = hv ? byDate.get(hv) : undefined;
   const hvCh = hv ? chByDate.get(hv) : undefined;
   const hvSpan = hv ? visibleSpans.find((s) => hv >= s.aD && hv <= s.bD) : undefined;
+  // Canale ancorato attivo alla data sorvolata: fra quelli che la contengono,
+  // l'ultimo già confermato (i canali si sovrappongono di qualche barra).
+  const hvAnch = hv
+    ? [...anchored].reverse().find((s) => hv >= s.a && hv <= s.b && s.c.confirmedAt <= hv) ??
+      anchored.find((s) => hv >= s.a && hv <= s.b)
+    : undefined;
+  const dirColor = (d: DrawnChannel["dir"]) =>
+    d === "up" ? "var(--positive)" : d === "down" ? "var(--negative)" : "var(--muted)";
+  const dirLabel = (d: DrawnChannel["dir"]) => (d === "up" ? "rialzista" : d === "down" ? "ribassista" : "laterale");
 
   return (
     <div>
@@ -187,6 +235,33 @@ export function SyncedTimeChart({
           </>
         )}
 
+        {/* canali ancorati, stile ProRealTime (ritagliati sull'area del grafico) */}
+        <clipPath id={`plot-${kind}-${height}`}>
+          <rect x={PAD.left} y={PAD.top} width={iw} height={ih} />
+        </clipPath>
+        <g clipPath={`url(#plot-${kind}-${height})`}>
+        {anchored.map((s, k) => {
+          const { c, a, b, midA, midB } = s;
+          const col = dirColor(c.dir);
+          const active = hvAnch === s;
+          return (
+            <g key={`a${k}`}>
+              <polygon
+                points={`${x(a)},${y(midA + c.band)} ${x(b)},${y(midB + c.band)} ${x(b)},${y(midB)} ${x(a)},${y(midA)}`}
+                fill="var(--positive)" opacity={active ? 0.2 : 0.11}
+              />
+              <polygon
+                points={`${x(a)},${y(midA)} ${x(b)},${y(midB)} ${x(b)},${y(midB - c.band)} ${x(a)},${y(midA - c.band)}`}
+                fill="var(--negative)" opacity={active ? 0.16 : 0.08}
+              />
+              <line x1={x(a)} y1={y(midA + c.band)} x2={x(b)} y2={y(midB + c.band)} stroke={col} strokeWidth={active ? 1.6 : 1.1} />
+              <line x1={x(a)} y1={y(midA - c.band)} x2={x(b)} y2={y(midB - c.band)} stroke={col} strokeWidth={active ? 1.6 : 1.1} />
+              <line x1={x(a)} y1={y(midA)} x2={x(b)} y2={y(midB)} stroke="var(--warning)" strokeWidth="1" strokeDasharray="4 3" opacity="0.75" />
+            </g>
+          );
+        })}
+        </g>
+
         {/* serie */}
         <polyline
           points={line(visible, (p: { value: number }) => p.value)}
@@ -215,6 +290,17 @@ export function SyncedTimeChart({
                 />
               )}
             </g>
+          );
+        })}
+
+        {/* pallino: seduta in cui la nascita del canale è stata confermata */}
+        {anchored.map((s, k) => {
+          if (!s.confirmedVisible) return null;
+          const v = byDate.get(s.c.confirmedAt);
+          if (v == null) return null;
+          return (
+            <circle key={`c${k}`} cx={x(s.c.confirmedAt)} cy={y(v)} r="3.5"
+              fill={dirColor(s.c.dir)} stroke="var(--surface)" strokeWidth="1" />
           );
         })}
 
@@ -256,6 +342,13 @@ export function SyncedTimeChart({
             ) : (
               channel && <span className="text-[var(--muted)]">fuori dalla finestra del canale</span>
             )}
+            {hvAnch && (
+              <span style={{ color: dirColor(hvAnch.c.dir) }}>
+                canale {dirLabel(hvAnch.c.dir)} dal {hvAnch.c.from}
+                {hvAnch.c.cause !== "start" ? ` (confermato il ${hvAnch.c.confirmedAt})` : ""}
+                {" · "}{hvAnch.c.slopePct >= 0 ? "+" : ""}{hvAnch.c.slopePct}%/anno
+              </span>
+            )}
             {spans && (
               hvSpan ? (
                 <span className={hvSpan.to == null ? "text-[var(--accent)]" : (hvSpan.returnPct ?? 0) >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]"}>
@@ -269,7 +362,7 @@ export function SyncedTimeChart({
           </>
         ) : (
           <span className="text-[var(--muted)]">
-            Passa il mouse su uno qualsiasi dei grafici: il cursore si muove su tutti e tre.
+            Passa il mouse su uno qualsiasi dei grafici: il cursore si muove su tutti.
           </span>
         )}
       </div>
