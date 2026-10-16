@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChannelPoint, DrawnChannel } from "@/lib/worldMomentum";
 
 /** Un periodo di possesso da ombreggiare, con i marcatori di ingresso e uscita. */
@@ -25,6 +25,9 @@ export interface HoldingSpan {
  * superiore verde, metà inferiore rossa, retta centrale tratteggiata, bordi
  * del colore della direzione. Il pallino segna la seduta in cui la nascita del
  * canale è stata confermata — da lì in poi lo si sapeva davvero.
+ *
+ * Un clic fissa una data (`pinnedDate`) su tutti i grafici; un secondo clic
+ * sulla stessa data la toglie. Il cursore del mouse resta libero di muoversi.
  */
 export function SyncedTimeChart({
   domain,
@@ -36,6 +39,8 @@ export function SyncedTimeChart({
   kind,
   hoverDate,
   onHover,
+  pinnedDate = null,
+  onPin,
   height = 300,
 }: {
   domain: string[];
@@ -47,11 +52,30 @@ export function SyncedTimeChart({
   kind: "price" | "meta";
   hoverDate: string | null;
   onHover: (date: string | null) => void;
+  pinnedDate?: string | null;
+  onPin?: (date: string | null) => void;
   height?: number;
 }) {
   const svgRef = useRef<SVGSVGElement>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
 
-  const W = 900;
+  // La larghezza del disegno è quella VERA del contenitore: con una larghezza
+  // fissa l'SVG, scalato mantenendo le proporzioni, restava centrato con dei
+  // margini vuoti sui lati, e il cursore — calcolato sulla larghezza intera —
+  // non stava più sotto il mouse.
+  const [boxW, setBoxW] = useState(900);
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const w = Math.round(entries[0].contentRect.width);
+      if (w > 0) setBoxW(w);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const W = Math.max(320, boxW);
   const H = height;
   const PAD = { top: 16, right: 16, bottom: 30, left: 74 };
   const iw = W - PAD.left - PAD.right;
@@ -109,7 +133,8 @@ export function SyncedTimeChart({
       }
     }
     const pad = (hi - lo) * 0.06 || Math.abs(hi) * 0.01 || 1;
-    return { min: lo - pad, max: hi + pad };
+    // Prezzi e metatitolo sono positivi: l'asse non scende sotto zero.
+    return { min: Math.max(0, lo - pad), max: hi + pad };
   }, [visible, visibleCh, anchored]);
 
   if (n < 2 || visible.length < 2) return null;
@@ -159,15 +184,32 @@ export function SyncedTimeChart({
     })
     .filter((v): v is NonNullable<typeof v> => v !== null);
 
-  function onMove(e: React.MouseEvent<SVGSVGElement>) {
-    const rect = svgRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const vx = ((e.clientX - rect.left) / rect.width) * W;
-    const i = Math.round(((vx - PAD.left) / iw) * (n - 1));
-    onHover(i >= 0 && i < n ? domain[i] : null);
+  /** Data sotto il mouse, dalle coordinate reali del disegno (matrice dello schermo). */
+  function dateAt(e: React.MouseEvent<SVGSVGElement>): string | null {
+    const svg = svgRef.current;
+    const ctm = svg?.getScreenCTM();
+    if (!svg || !ctm) return null;
+    const pt = new DOMPoint(e.clientX, e.clientY).matrixTransform(ctm.inverse());
+    if (pt.x < PAD.left - 12 || pt.x > W - PAD.right + 12) return null;
+    const i = Math.round(((pt.x - PAD.left) / iw) * (n - 1));
+    return domain[Math.min(n - 1, Math.max(0, i))];
   }
 
-  const hv = hoverDate && idx.has(hoverDate) ? hoverDate : null;
+  function onMove(e: React.MouseEvent<SVGSVGElement>) {
+    onHover(dateAt(e));
+  }
+
+  function onClick(e: React.MouseEvent<SVGSVGElement>) {
+    if (!onPin) return;
+    const d = dateAt(e);
+    if (d) onPin(d === pinnedDate ? null : d);
+  }
+
+  const pv = pinnedDate && idx.has(pinnedDate) ? pinnedDate : null;
+  // Il riquadro sotto il grafico mostra la data sotto il mouse, o in sua
+  // assenza quella fissata.
+  const hv = hoverDate && idx.has(hoverDate) ? hoverDate : pv;
+  const showingPin = hv != null && hv === pv && !(hoverDate && idx.has(hoverDate));
   const hvValue = hv ? byDate.get(hv) : undefined;
   const hvCh = hv ? chByDate.get(hv) : undefined;
   const hvSpan = hv ? visibleSpans.find((s) => hv >= s.aD && hv <= s.bD) : undefined;
@@ -182,14 +224,16 @@ export function SyncedTimeChart({
   const dirLabel = (d: DrawnChannel["dir"]) => (d === "up" ? "rialzista" : d === "down" ? "ribassista" : "laterale");
 
   return (
-    <div>
+    <div ref={boxRef}>
       <svg
         ref={svgRef}
         viewBox={`0 0 ${W} ${H}`}
-        className="w-full"
-        style={{ height }}
+        width="100%"
+        height={height}
+        className={onPin ? "cursor-crosshair" : undefined}
         onMouseMove={onMove}
         onMouseLeave={() => onHover(null)}
+        onClick={onClick}
         role="img"
         aria-label={kind === "price" ? "Prezzo nel tempo" : "Metatitolo nel tempo"}
       >
@@ -318,8 +362,20 @@ export function SyncedTimeChart({
           </text>
         ))}
 
+        {/* data fissata con un clic: resta finché non la togli */}
+        {pv && (
+          <g>
+            <line x1={x(pv)} x2={x(pv)} y1={PAD.top} y2={H - PAD.bottom} stroke="var(--accent)" strokeWidth="2" />
+            <rect x={Math.min(W - PAD.right - 78, Math.max(PAD.left, x(pv) - 39))} y={PAD.top - 14} width="78" height="14" rx="3" fill="var(--accent)" />
+            <text x={Math.min(W - PAD.right - 39, Math.max(PAD.left + 39, x(pv)))} y={PAD.top - 3.5} textAnchor="middle" fontSize="10" fill="white" fontFamily="monospace">
+              {pv}
+            </text>
+            {byDate.get(pv) != null && <circle cx={x(pv)} cy={y(byDate.get(pv)!)} r="4.5" fill="var(--accent)" stroke="white" strokeWidth="1.2" />}
+          </g>
+        )}
+
         {/* cursore condiviso */}
-        {hv && (
+        {hv && hv !== pv && (
           <g>
             <line x1={x(hv)} x2={x(hv)} y1={PAD.top} y2={H - PAD.bottom} stroke="var(--accent-2)" strokeWidth="1.2" opacity="0.9" />
             {hvValue != null && <circle cx={x(hv)} cy={y(hvValue)} r="4" fill="var(--accent-2)" />}
@@ -331,7 +387,9 @@ export function SyncedTimeChart({
       <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs font-mono mt-1 min-h-[20px] px-1">
         {hv ? (
           <>
-            <span className="text-[var(--accent-2)]">{hv}</span>
+            <span className={showingPin ? "text-[var(--accent)]" : "text-[var(--accent-2)]"}>
+              {showingPin ? "📌 " : ""}{hv}
+            </span>
             {hvValue != null && <span>valore <strong>{fmt(hvValue)}</strong></span>}
             {hvCh ? (
               <>
@@ -363,6 +421,7 @@ export function SyncedTimeChart({
         ) : (
           <span className="text-[var(--muted)]">
             Passa il mouse su uno qualsiasi dei grafici: il cursore si muove su tutti.
+            {onPin ? " Clic per fissare una data." : ""}
           </span>
         )}
       </div>

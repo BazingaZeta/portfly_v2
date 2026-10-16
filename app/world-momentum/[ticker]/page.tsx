@@ -4,10 +4,14 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import { SyncedTimeChart, type HoldingSpan } from "@/components/SyncedTimeChart";
+import { MultiEquityChart } from "@/components/MultiEquityChart";
+import { useLivePrices } from "@/components/LivePrice";
 import { LoadingPanel } from "@/components/Loading";
 import { money } from "@/lib/format";
 import { runFetchJob, useJob, usePersistentState } from "@/lib/analysisStore";
-import type { WorldTickerDetail, ChannelDetail, TickerSignalHistory, AnchoredNow } from "@/lib/worldMomentum";
+import type {
+  WorldTickerDetail, ChannelDetail, TickerSignalHistory, AnchoredNow, TickerSignal, TickerBacktest, TickerBacktestStats,
+} from "@/lib/worldMomentum";
 
 // ─── Blocchi di spiegazione ──────────────────────────────────────────────────
 
@@ -134,6 +138,277 @@ function NowBadge({ label, now }: { label: string; now: AnchoredNow }) {
   );
 }
 
+const signed = (v: number, dp = 2) => `${v >= 0 ? "+" : ""}${v.toFixed(dp)}%`;
+
+/**
+ * Registro dei segnali. La posizione ancora aperta non resta un "aperta" muto:
+ * mostra il prezzo di oggi (live se il mercato è aperto, altrimenti l'ultima
+ * chiusura) e il guadagno o la perdita non realizzati a quel prezzo.
+ */
+function SignalsTable({
+  signals, livePrice, onHover,
+}: {
+  signals: TickerSignal[]; livePrice?: number; onHover: (d: string | null) => void;
+}) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-xs [&_th]:pr-4 [&_td]:pr-4 [&_th:last-child]:pr-0 [&_td:last-child]:pr-0">
+        <thead>
+          <tr className="text-[var(--muted)] text-left">
+            <th className="pb-2 font-medium">#</th>
+            <th className="pb-2 font-medium">Acquisto</th>
+            <th className="pb-2 font-medium text-right">Prezzo</th>
+            <th className="pb-2 font-medium">Vendita</th>
+            <th className="pb-2 font-medium text-right">Prezzo</th>
+            <th className="pb-2 font-medium text-right">Risultato</th>
+            <th className="pb-2 font-medium text-right">Barre</th>
+            <th className="pb-2 font-medium">Motivo dell&apos;uscita</th>
+          </tr>
+        </thead>
+        <tbody className="font-mono">
+          {signals.map((sig, i) => {
+            const open = sig.exitDate == null;
+            const nowPrice = open ? (livePrice && livePrice > 0 ? livePrice : sig.lastPrice) : undefined;
+            const openPct = open && nowPrice != null ? ((nowPrice - sig.entryPrice) / sig.entryPrice) * 100 : null;
+            const ret = open ? openPct : sig.returnPct;
+            return (
+              <tr
+                key={`${sig.entryDate}-${i}`}
+                className={`border-t border-[var(--border)] cursor-pointer hover:bg-[var(--surface-2)] ${open ? "bg-[color-mix(in_srgb,var(--accent)_7%,transparent)]" : ""}`}
+                onMouseEnter={() => onHover(sig.entryDate)}
+                onMouseLeave={() => onHover(null)}
+                title="Passa sopra la riga per ritrovarla sui grafici"
+              >
+                <td className="py-1.5 text-[var(--muted)]">{i + 1}</td>
+                <td className="py-1.5 text-[var(--positive)]">▲ {sig.entryDate}</td>
+                <td className="py-1.5 text-right">${sig.entryPrice.toFixed(2)}</td>
+                <td className="py-1.5 text-[var(--negative)]">
+                  {open ? <span className="text-[var(--accent)] font-sans">aperta · valutata oggi</span> : `▼ ${sig.exitDate}`}
+                </td>
+                <td className="py-1.5 text-right">
+                  {open
+                    ? nowPrice != null ? <span className="text-[var(--accent)]">${nowPrice.toFixed(2)}</span> : "—"
+                    : sig.exitPrice != null ? `$${sig.exitPrice.toFixed(2)}` : "—"}
+                </td>
+                <td className={`py-1.5 text-right ${ret == null ? "" : ret >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>
+                  {ret != null ? signed(ret) : "—"}
+                  {open && ret != null && <span className="text-[10px] text-[var(--muted)] font-sans"> non realizzato</span>}
+                </td>
+                <td className="py-1.5 text-right text-[var(--muted)]">{sig.barsHeld}</td>
+                <td className="py-1.5 text-[var(--muted)] font-sans">{sig.exitReason}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** Righe della tabella di confronto: `better` dice quale valore vince. */
+const BT_ROWS: { label: string; hint: string; get: (s: TickerBacktestStats) => number; fmt: (v: number) => string; better: "high" | "low" | null }[] = [
+  { label: "Rendimento totale", hint: "Sull'intero periodo, posizione aperta valutata all'ultima chiusura", get: (s) => s.totalReturn, fmt: (v) => signed(v, 1), better: "high" },
+  { label: "Rendimento annuo (CAGR)", hint: "Rendimento composto per anno", get: (s) => s.cagr, fmt: (v) => signed(v, 1), better: "high" },
+  { label: "Max drawdown", hint: "La perdita peggiore dal massimo precedente, perdite non realizzate comprese", get: (s) => s.maxDrawdown, fmt: (v) => `${v.toFixed(1)}%`, better: "low" },
+  { label: "Rendimento ÷ rischio", hint: "CAGR diviso max drawdown (Calmar): più alto = più rendimento per ogni punto di perdita sopportata", get: (s) => s.calmar, fmt: (v) => v.toFixed(2), better: "high" },
+  { label: "Operazioni", hint: "Compravendite nel periodo, compresa quella aperta", get: (s) => s.trades, fmt: (v) => String(v), better: null },
+  { label: "In utile", hint: "Quota delle operazioni chiuse in guadagno", get: (s) => s.winRate, fmt: (v) => `${v.toFixed(0)}%`, better: "high" },
+  { label: "Guadagno medio per operazione", hint: "Media dei risultati delle singole operazioni", get: (s) => s.avgReturnPct, fmt: (v) => signed(v, 1), better: "high" },
+  { label: "Operazione migliore", hint: "", get: (s) => s.bestPct, fmt: (v) => signed(v, 1), better: "high" },
+  { label: "Operazione peggiore", hint: "", get: (s) => s.worstPct, fmt: (v) => signed(v, 1), better: "high" },
+  { label: "Durata media", hint: "Sedute in posizione per operazione", get: (s) => s.avgBarsHeld, fmt: (v) => `${v.toFixed(0)} sedute`, better: null },
+  { label: "Tempo investito", hint: "Quota del periodo passata in posizione: il resto è in cassa", get: (s) => s.timeInMarketPct, fmt: (v) => `${v.toFixed(0)}%`, better: null },
+];
+
+const STRAT_COLORS = ["var(--warning)", "var(--accent)"];
+/** Nome della strategia dentro una frase. */
+const inSentence = (key: string) => (key === "anchored" ? "il metodo Antonio" : "la strategia attuale");
+
+/** Backtest della regola sul solo titolo: strategia attuale contro metodo Antonio. */
+function TickerBacktestPanel({
+  ticker, query, anchoredChannels, hoverDate, onHover, pinnedDate, onPin, livePrice,
+}: {
+  ticker: string;
+  query: string;
+  anchoredChannels: WorldTickerDetail["anchored"]["price"];
+  hoverDate: string | null;
+  onHover: (d: string | null) => void;
+  pinnedDate: string | null;
+  onPin: (d: string | null) => void;
+  livePrice?: number;
+}) {
+  const [years, setYears] = usePersistentState<number>("world:tickerbt:years", 5);
+  const key = `world:tickerbt:${query}:${years}`;
+  const job = useJob<TickerBacktest>(key);
+  const bt = job.result ?? null;
+  const [tab, setTab] = useState(1);
+
+  const run = () => runFetchJob(key, () => getJson<TickerBacktest>(`/api/world/ticker-backtest?${query}&btYears=${years}`));
+
+  const domain = useMemo(() => (bt ? bt.series.map((p) => p.date) : []), [bt]);
+  const series = useMemo(() => (bt ? bt.series.map((p) => ({ date: p.date, value: p.close })) : []), [bt]);
+
+  const [a, b] = bt?.strategies ?? [];
+  const verdict = useMemo(() => {
+    if (!a || !b) return null;
+    const winner = b.stats.totalReturn > a.stats.totalReturn ? b : a;
+    const loser = winner === a ? b : a;
+    const ddBetter = b.stats.maxDrawdown < a.stats.maxDrawdown ? b : a;
+    return { winner, loser, ddBetter };
+  }, [a, b]);
+
+  return (
+    <section className="glass rounded-2xl p-5">
+      <div className="flex items-baseline justify-between gap-3 flex-wrap mb-1">
+        <h2 className="text-lg font-semibold">Backtest su {ticker}: strategia attuale contro metodo Antonio</h2>
+      </div>
+      <p className="text-xs text-[var(--muted)] mb-4 max-w-3xl">
+        Le due strategie applicate solo a questo titolo, sulle stesse date e con lo stesso capitale
+        iniziale: tutto investito quando c&apos;è una posizione, in cassa quando non c&apos;è. Il buy
+        &amp; hold del titolo e il benchmark servono da riferimento.
+      </p>
+
+      <div className="flex items-center gap-3 flex-wrap mb-4">
+        <div className="flex gap-1">
+          {[3, 5, 10].map((y) => (
+            <button
+              key={y}
+              onClick={() => setYears(y)}
+              className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${
+                years === y ? "bg-[var(--surface-2)] text-[var(--foreground)]" : "text-[var(--muted)] hover:text-[var(--foreground)]"
+              }`}
+            >
+              {y} anni
+            </button>
+          ))}
+        </div>
+        <button className="btn-primary" onClick={run} disabled={job.status === "running"}>
+          {job.status === "running" ? "Backtest in corso…" : bt ? "↻ Rifai il backtest" : `▶ Avvia backtest su ${ticker}`}
+        </button>
+      </div>
+
+      {job.status === "running" && !bt && <LoadingPanel label={`Simulo le due strategie su ${ticker}…`} />}
+      {job.status === "error" && <p className="text-sm" style={{ color: "var(--negative)" }}>{job.error}</p>}
+
+      {bt && a && b && verdict && (
+        <div className="flex flex-col gap-5">
+          <div className="rounded-xl p-3 text-sm" style={{ background: "var(--surface-2)", borderLeft: `3px solid ${STRAT_COLORS[bt.strategies.indexOf(verdict.winner)]}` }}>
+            Dal {bt.from} al {bt.to}, su {ticker} ha reso di più <strong>{inSentence(verdict.winner.key)}</strong>:{" "}
+            <span className="font-mono">{signed(verdict.winner.stats.totalReturn, 1)}</span> contro{" "}
+            <span className="font-mono">{signed(verdict.loser.stats.totalReturn, 1)}</span>.{" "}
+            {verdict.ddBetter === verdict.winner
+              ? "E con un drawdown più basso."
+              : `Il drawdown però è stato più basso con ${inSentence(verdict.ddBetter.key)} (${verdict.ddBetter.stats.maxDrawdown}% contro ${(verdict.ddBetter === a ? b : a).stats.maxDrawdown}%).`}
+            <span className="text-[var(--muted)]"> Buy &amp; hold {signed(bt.buyHold.stats.totalReturn, 1)}, {bt.benchmark} {signed(bt.benchReturn, 1)}.</span>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs [&_th]:pr-4 [&_td]:pr-4 [&_th:last-child]:pr-0 [&_td:last-child]:pr-0">
+              <thead>
+                <tr className="text-[var(--muted)] text-left">
+                  <th className="pb-2 font-medium">Metrica</th>
+                  {bt.strategies.map((st, k) => (
+                    <th key={st.key} className="pb-2 font-medium text-right">
+                      <span className="inline-block w-3 h-0.5 mr-1.5 align-middle" style={{ background: STRAT_COLORS[k] }} />
+                      {st.label}
+                    </th>
+                  ))}
+                  <th className="pb-2 font-medium text-right">Buy &amp; hold</th>
+                </tr>
+              </thead>
+              <tbody className="font-mono">
+                {BT_ROWS.map((r) => {
+                  const va = r.get(a.stats), vb = r.get(b.stats);
+                  const win = r.better == null || va === vb ? null : (r.better === "high" ? vb > va : vb < va) ? 1 : 0;
+                  return (
+                    <tr key={r.label} className="border-t border-[var(--border)]">
+                      <td className="py-1.5 font-sans" title={r.hint}>{r.label}</td>
+                      {[va, vb].map((v, k) => (
+                        <td key={k} className={`py-1.5 text-right ${win === k ? "font-semibold text-[var(--positive)]" : ""}`}>
+                          {r.fmt(v)}{win === k ? " ✓" : ""}
+                        </td>
+                      ))}
+                      <td className="py-1.5 text-right text-[var(--muted)]">
+                        {r.label === "Operazioni" || r.label === "In utile" || r.label.startsWith("Operazione") || r.label.startsWith("Guadagno") || r.label === "Durata media"
+                          ? "—"
+                          : r.fmt(r.get(bt.buyHold.stats))}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <p className="text-[11px] text-[var(--muted)] mt-1">✓ = meglio fra le due strategie. Uscita del metodo Antonio: {b.exitLabel}.</p>
+          </div>
+
+          <div>
+            <h3 className="text-sm font-semibold mb-1">Capitale nel tempo (partendo da ${bt.accountSize.toLocaleString("it-IT")})</h3>
+            <MultiEquityChart
+              base={bt.accountSize}
+              lines={[
+                { label: a.label, color: STRAT_COLORS[0], points: a.equity },
+                { label: b.label, color: STRAT_COLORS[1], points: b.equity },
+                { label: "Buy & hold", color: "var(--muted)", points: bt.buyHold.equity, dashed: true },
+                { label: bt.benchmark, color: "var(--accent-2)", points: bt.benchEquity, dashed: true },
+              ]}
+              hoverDate={hoverDate} onHover={onHover} pinnedDate={pinnedDate} onPin={onPin} height={300}
+            />
+          </div>
+
+          <div>
+            <h3 className="text-sm font-semibold mb-1">Dove sono entrate e uscite</h3>
+            <p className="text-[11px] text-[var(--muted)] mb-2">
+              Stesso prezzo, stesso periodo: sopra la strategia attuale, sotto il metodo Antonio con i suoi canali.
+              Fascia verde = operazione in utile, rossa = in perdita, azzurra = ancora aperta.
+            </p>
+            {bt.strategies.map((st, k) => (
+              <div key={st.key} className="mb-3">
+                <p className="text-xs mb-0.5 flex items-center gap-2">
+                  <span className="inline-block w-3 h-0.5" style={{ background: STRAT_COLORS[k] }} />
+                  <strong>{st.label}</strong>
+                  <span className="text-[var(--muted)]">· {st.stats.trades} operazioni · {signed(st.stats.totalReturn, 1)}</span>
+                </p>
+                <SyncedTimeChart
+                  domain={domain} series={series} kind="price"
+                  spans={st.signals.map((g) => ({ from: g.entryDate, to: g.exitDate, returnPct: g.returnPct }))}
+                  channels={st.key === "anchored" ? anchoredChannels : undefined}
+                  hoverDate={hoverDate} onHover={onHover} pinnedDate={pinnedDate} onPin={onPin} height={220}
+                />
+              </div>
+            ))}
+          </div>
+
+          <div>
+            <div className="flex items-center gap-2 mb-2 flex-wrap">
+              <h3 className="text-sm font-semibold mr-2">Operazioni</h3>
+              {bt.strategies.map((st, k) => (
+                <button
+                  key={st.key}
+                  onClick={() => setTab(k)}
+                  className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${
+                    tab === k ? "bg-[var(--surface-2)] text-[var(--foreground)]" : "text-[var(--muted)] hover:text-[var(--foreground)]"
+                  }`}
+                >
+                  {st.label} ({st.signals.length})
+                </button>
+              ))}
+            </div>
+            <SignalsTable signals={bt.strategies[tab]?.signals ?? []} livePrice={livePrice} onHover={onHover} />
+          </div>
+
+          <p className="text-[11px] text-[var(--muted)] max-w-3xl">
+            È la regola sul solo titolo, non il portafoglio: qui non c&apos;è la classifica per forza
+            relativa, né il limite di posizioni, né la protezione dai drawdown (che agisce sul
+            portafoglio intero). Scivolamento di 5 punti base a ogni compravendita. Scegliere il
+            titolo guardando il grafico di oggi è senno di poi: il confronto fra le due regole è
+            onesto, il rendimento assoluto no.
+          </p>
+        </div>
+      )}
+    </section>
+  );
+}
+
 /** Periodo mostrato, in barre di borsa: vale per tutti e tre i grafici insieme. */
 const RANGES = [
   { key: "3M", bars: 63 },
@@ -194,6 +469,10 @@ export default function TickerDetailPage() {
 
   const [range, setRange] = usePersistentState<string>("world:detail:range", "1A");
   const [hoverDate, setHoverDate] = useState<string | null>(null);
+  // Data fissata con un clic su un grafico: resta su tutti finché non la togli.
+  const [pinnedDate, setPinnedDate] = useState<string | null>(null);
+  const { prices: live } = useLivePrices(data ? [data.ticker] : [], 30_000);
+  const livePrice = data ? live[data.ticker] : undefined;
 
   // Asse temporale condiviso: le ultime N date dello storico allineato.
   const domain = useMemo(() => {
@@ -219,6 +498,10 @@ export default function TickerDetailPage() {
   const weeklyHover = useMemo(
     () => (hoverDate ? weeklyDomain.find((d) => d >= hoverDate) ?? null : null),
     [hoverDate, weeklyDomain]
+  );
+  const weeklyPinned = useMemo(
+    () => (pinnedDate ? weeklyDomain.find((d) => d >= pinnedDate) ?? null : null),
+    [pinnedDate, weeklyDomain]
   );
   const priceSeries = useMemo(() => (data ? data.context.map((c) => ({ date: c.date, value: c.close })) : []), [data]);
   const spans = useMemo<HoldingSpan[]>(
@@ -302,6 +585,14 @@ export default function TickerDetailPage() {
             <span className="text-[11px] text-[var(--muted)]">
               {domain[0]} → {domain[domain.length - 1]} · tutti i grafici condividono asse temporale e cursore
             </span>
+            {pinnedDate ? (
+              <span className="ml-auto inline-flex items-center gap-2 text-xs rounded-lg px-2.5 py-1 bg-[color-mix(in_srgb,var(--accent)_18%,transparent)] text-[var(--accent)]">
+                📌 data fissata <span className="font-mono">{pinnedDate}</span>
+                <button className="hover:text-[var(--foreground)]" onClick={() => setPinnedDate(null)} title="Togli la data fissata">✕</button>
+              </span>
+            ) : (
+              <span className="ml-auto text-[11px] text-[var(--muted)]">Clic su un grafico per fissare una data</span>
+            )}
           </div>
 
           {/* ── Canali ancorati (come su ProRealTime) ── */}
@@ -332,7 +623,7 @@ export default function TickerDetailPage() {
             <SyncedTimeChart
               domain={domain} series={priceSeries} channels={data.anchored.price}
               spans={anchoredMode ? spans : undefined} kind="price"
-              hoverDate={hoverDate} onHover={setHoverDate} height={320}
+              hoverDate={hoverDate} onHover={setHoverDate} pinnedDate={pinnedDate} onPin={setPinnedDate} height={320}
             />
             {anchoredMode && (
               <p className="text-[11px] text-[var(--muted)] mt-1 px-1">
@@ -347,7 +638,7 @@ export default function TickerDetailPage() {
             </p>
             <SyncedTimeChart
               domain={domain} series={metaSeries} channels={data.anchored.meta} kind="meta"
-              hoverDate={hoverDate} onHover={setHoverDate} height={240}
+              hoverDate={hoverDate} onHover={setHoverDate} pinnedDate={pinnedDate} onPin={setPinnedDate} height={240}
             />
 
             <h3 className="text-sm font-semibold mt-5 mb-1">Prezzo — settimanale</h3>
@@ -358,7 +649,7 @@ export default function TickerDetailPage() {
             {weeklyDomain.length > 1 ? (
               <SyncedTimeChart
                 domain={weeklyDomain} series={weeklySeries} channels={data.anchored.weekly.channels} kind="price"
-                hoverDate={weeklyHover} onHover={setHoverDate} height={240}
+                hoverDate={weeklyHover} onHover={setHoverDate} pinnedDate={weeklyPinned} onPin={setPinnedDate} height={240}
               />
             ) : (
               <p className="text-xs text-[var(--muted)]">Periodo troppo breve per il settimanale: scegli 6M o più.</p>
@@ -370,6 +661,12 @@ export default function TickerDetailPage() {
               fino a quel giorno, e un canale nuovo conta solo dal pallino in poi.
             </p>
           </section>
+
+          <TickerBacktestPanel
+            ticker={data.ticker} query={query} anchoredChannels={data.anchored.price}
+            hoverDate={hoverDate} onHover={setHoverDate} pinnedDate={pinnedDate} onPin={setPinnedDate}
+            livePrice={livePrice}
+          />
 
           {/* ── Stadio 1 ── */}
           {!anchoredMode && (<>
@@ -390,7 +687,7 @@ export default function TickerDetailPage() {
 
             <SyncedTimeChart
               domain={domain} series={metaSeries} channel={data.meta.points} kind="meta"
-              hoverDate={hoverDate} onHover={setHoverDate} height={260}
+              hoverDate={hoverDate} onHover={setHoverDate} pinnedDate={pinnedDate} onPin={setPinnedDate} height={260}
             />
 
             <div className="mt-5">
@@ -453,7 +750,7 @@ export default function TickerDetailPage() {
                 <SyncedTimeChart
                   domain={domain} series={priceSeries} channel={data.priceChannel.points}
                   entryMaxZ={data.options.entryMaxZ} kind="price"
-                  hoverDate={hoverDate} onHover={setHoverDate} height={260}
+                  hoverDate={hoverDate} onHover={setHoverDate} pinnedDate={pinnedDate} onPin={setPinnedDate} height={260}
                 />
                 <div className="mt-5">
                   <h3 className="text-sm font-semibold mb-2">Come è costruito</h3>
@@ -500,52 +797,15 @@ export default function TickerDetailPage() {
 
                   <SyncedTimeChart
                     domain={domain} series={priceSeries} spans={spans} kind="price"
-                    hoverDate={hoverDate} onHover={setHoverDate} height={280}
+                    hoverDate={hoverDate} onHover={setHoverDate} pinnedDate={pinnedDate} onPin={setPinnedDate} height={280}
                   />
                   <p className="text-[11px] text-[var(--muted)] mt-1 px-1">
                     ▲ acquisto · ▼ vendita · fascia verde = periodo in utile, rossa = in perdita ·
                     nel grafico {signalsInRange} segnali del periodo selezionato, in tabella tutti i {s.count}.
                   </p>
 
-                  <div className="overflow-x-auto mt-5">
-                    <table className="w-full text-xs [&_th]:pr-4 [&_td]:pr-4 [&_th:last-child]:pr-0 [&_td:last-child]:pr-0">
-                      <thead>
-                        <tr className="text-[var(--muted)] text-left">
-                          <th className="pb-2 font-medium">#</th>
-                          <th className="pb-2 font-medium">Acquisto</th>
-                          <th className="pb-2 font-medium text-right">Prezzo</th>
-                          <th className="pb-2 font-medium">Vendita</th>
-                          <th className="pb-2 font-medium text-right">Prezzo</th>
-                          <th className="pb-2 font-medium text-right">Risultato</th>
-                          <th className="pb-2 font-medium text-right">Barre</th>
-                          <th className="pb-2 font-medium">Motivo dell&apos;uscita</th>
-                        </tr>
-                      </thead>
-                      <tbody className="font-mono">
-                        {signals.signals.map((sig, i) => (
-                          <tr
-                            key={`${sig.entryDate}-${i}`}
-                            className="border-t border-[var(--border)] cursor-pointer hover:bg-[var(--surface-2)]"
-                            onMouseEnter={() => setHoverDate(sig.entryDate)}
-                            onMouseLeave={() => setHoverDate(null)}
-                            title="Passa sopra la riga per ritrovarla sui grafici"
-                          >
-                            <td className="py-1.5 text-[var(--muted)]">{i + 1}</td>
-                            <td className="py-1.5 text-[var(--positive)]">▲ {sig.entryDate}</td>
-                            <td className="py-1.5 text-right">${sig.entryPrice.toFixed(2)}</td>
-                            <td className="py-1.5 text-[var(--negative)]">
-                              {sig.exitDate ? `▼ ${sig.exitDate}` : <span className="text-[var(--accent)]">aperta</span>}
-                            </td>
-                            <td className="py-1.5 text-right">{sig.exitPrice != null ? `$${sig.exitPrice.toFixed(2)}` : "—"}</td>
-                            <td className={`py-1.5 text-right ${sig.returnPct == null ? "" : sig.returnPct >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>
-                              {sig.returnPct != null ? `${sig.returnPct >= 0 ? "+" : ""}${sig.returnPct}%` : "—"}
-                            </td>
-                            <td className="py-1.5 text-right text-[var(--muted)]">{sig.barsHeld}</td>
-                            <td className="py-1.5 text-[var(--muted)] font-sans">{sig.exitReason}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                  <div className="mt-5">
+                    <SignalsTable signals={signals.signals} livePrice={livePrice} onHover={setHoverDate} />
                   </div>
 
                   <p className="text-[11px] text-[var(--muted)] mt-3">
