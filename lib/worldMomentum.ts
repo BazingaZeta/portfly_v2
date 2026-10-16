@@ -1870,6 +1870,9 @@ export interface TickerSignal {
   barsHeld: number;
   /** Perché si è usciti (o perché si è ancora dentro). */
   exitReason: string;
+  /** Solo per la posizione aperta: ultima chiusura e P&L non realizzato a quel prezzo. */
+  lastPrice?: number;
+  openReturnPct?: number;
 }
 
 export interface TickerSignalHistory {
@@ -1904,6 +1907,14 @@ export interface TickerSeries {
   meta: number[];
   /** Regime del benchmark per data; vuota = filtro disattivo. */
   regimeOk: Map<string, boolean>;
+}
+
+/** Giorni feriali dal lunedì 5 gennaio 1970: un contatore di sedute che non dipende da dove inizia la serie. */
+export function scanPhase(date: string): number {
+  const days = Math.round((Date.parse(date + "T00:00:00Z") - Date.UTC(1970, 0, 5)) / 86_400_000);
+  const weeks = Math.floor(days / 7);
+  const dow = days - weeks * 7;
+  return weeks * 5 + Math.min(dow, 5);
 }
 
 /**
@@ -1996,8 +2007,11 @@ export function replayTickerSignals(
       }
     }
 
-    // ── Entrata: solo alle barre di scan, come nel motore di portafoglio.
-    if (open || i % opts.scanFreq !== 0) continue;
+    // ── Entrata: solo alle barre di scan, come nel motore di portafoglio. Il
+    // turno di scan è agganciato al calendario, non all'indice della barra:
+    // altrimenti due storici di lunghezza diversa (storico segnali e backtest
+    // sul titolo) scansionerebbero in giorni diversi e darebbero date diverse.
+    if (open || scanPhase(dates[i]) % opts.scanFreq !== 0) continue;
     if (opts.useRegime && regimeOk.get(dates[i]) === false) continue;
 
     if (set) {
@@ -2018,6 +2032,7 @@ export function replayTickerSignals(
   // Posizione ancora aperta alla fine: la si mostra come tale, non la si chiude
   // d'ufficio — qui stiamo elencando segnali, non misurando una performance.
   if (open) {
+    const lastPrice = closes[n - 1];
     signals.push({
       entryDate: open.date,
       entryPrice: +open.price.toFixed(2),
@@ -2026,6 +2041,8 @@ export function replayTickerSignals(
       returnPct: null,
       barsHeld: n - 1 - open.bar,
       exitReason: "ancora aperta: il canale non si è rotto",
+      lastPrice: +lastPrice.toFixed(2),
+      openReturnPct: +(((lastPrice - open.price) / open.price) * 100).toFixed(2),
     });
   }
 
@@ -2043,18 +2060,16 @@ export function replayTickerSignals(
  * sole serie scaricate, non si può fare. Serve a vedere *dove* la strategia
  * sarebbe entrata e uscita su questo titolo; per il P&L reale vale il backtest.
  */
-export async function runTickerSignalHistory(
-  ticker: string,
-  options: Omit<WorldMomentumOptions, "startDate" | "endDate"> & { years?: number }
-): Promise<TickerSignalHistory> {
-  const today = new Date().toISOString().slice(0, 10);
-  const opts = resolveWorldOptions({
-    startDate: today,
-    endDate: today,
-    ...options,
-  } as WorldMomentumOptions);
-  const years = Math.min(10, Math.max(2, options.years ?? 5));
+/** Serie allineate di un titolo e del benchmark, pronte per replay e backtest. */
+interface LoadedTicker {
+  series: TickerSeries;
+  /** Close aggiustati del benchmark allineati alle stesse date. */
+  bench: number[];
+  /** Prima barra utile dopo il warm-up dei canali e dell'RS. */
+  need: number;
+}
 
+async function loadTickerSeries(ticker: string, opts: ResolvedWorldOptions, years: number): Promise<LoadedTicker> {
   const [benchCandles, candles] = await Promise.all([
     fetchCandles(opts.benchmark, years),
     fetchCandles(ticker, years),
@@ -2087,11 +2102,28 @@ export async function runTickerSignalHistory(
     }
   }
 
-  const signals = replayTickerSignals(
-    { dates, closes, opens: aligned.map((c) => c.open), meta, regimeOk },
-    opts,
-    need
-  );
+  return {
+    series: { dates, closes, opens: aligned.map((c) => c.open), meta, regimeOk },
+    bench: aligned.map((c) => benchByDate.get(c.date)!),
+    need,
+  };
+}
+
+export async function runTickerSignalHistory(
+  ticker: string,
+  options: Omit<WorldMomentumOptions, "startDate" | "endDate"> & { years?: number }
+): Promise<TickerSignalHistory> {
+  const today = new Date().toISOString().slice(0, 10);
+  const opts = resolveWorldOptions({
+    startDate: today,
+    endDate: today,
+    ...options,
+  } as WorldMomentumOptions);
+  const years = Math.min(10, Math.max(2, options.years ?? 5));
+
+  const { series, need } = await loadTickerSeries(ticker, opts, years);
+  const { dates, closes } = series;
+  const signals = replayTickerSignals(series, opts, need);
 
   const closed = signals.filter((s) => s.returnPct != null);
   const rets = closed.map((s) => s.returnPct!);
@@ -2101,7 +2133,7 @@ export async function runTickerSignalHistory(
   return {
     ticker,
     signals,
-    series: aligned.slice(need).map((c) => ({ date: c.date, close: +c.close.toFixed(2) })),
+    series: dates.slice(need).map((d, k) => ({ date: d, close: +closes[need + k].toFixed(2) })),
     from: dates[need],
     to: dates[dates.length - 1],
     summary: {
@@ -2117,6 +2149,218 @@ export async function runTickerSignalHistory(
         : 0,
       compoundedPct: rets.length ? +((compounded - 1) * 100).toFixed(1) : 0,
     },
+  };
+}
+
+// ─── Backtest sul singolo titolo: le due strategie a confronto ───────────────
+
+export interface TickerBacktestStats {
+  /** Rendimento totale sul periodo, posizione aperta valutata all'ultima chiusura. */
+  totalReturn: number;
+  cagr: number;
+  maxDrawdown: number;
+  /** Rendimento ÷ rischio: CAGR / max drawdown. */
+  calmar: number;
+  trades: number;
+  closedTrades: number;
+  winRate: number;
+  avgReturnPct: number;
+  bestPct: number;
+  worstPct: number;
+  avgBarsHeld: number;
+  /** Quota delle sedute passate in posizione. */
+  timeInMarketPct: number;
+}
+
+export interface TickerBacktestStrategy {
+  key: ChannelMode;
+  label: string;
+  /** La regola di uscita, in parole. */
+  exitLabel: string;
+  signals: TickerSignal[];
+  equity: { date: string; equity: number }[];
+  stats: TickerBacktestStats;
+}
+
+export interface TickerBacktest {
+  ticker: string;
+  name: string;
+  benchmark: string;
+  from: string;
+  to: string;
+  years: number;
+  accountSize: number;
+  /** [strategia attuale (finestra mobile), metodo Antonio (canali ancorati)]. */
+  strategies: TickerBacktestStrategy[];
+  buyHold: { equity: { date: string; equity: number }[]; stats: TickerBacktestStats };
+  benchEquity: { date: string; equity: number }[];
+  benchReturn: number;
+  /** Prezzi del periodo, per i marcatori di entrata e uscita. */
+  series: { date: string; close: number }[];
+}
+
+/**
+ * Equity di una strategia su UN titolo: tutto il capitale dentro quando c'è
+ * una posizione, tutto in cassa quando non c'è. Si entra all'apertura della
+ * barra dopo il segnale e si esce al close, come nel replay; lo scivolamento
+ * costa a ogni lato. Marcata a mercato ogni giorno, quindi il drawdown
+ * comprende anche le perdite non realizzate.
+ */
+export function tickerEquity(
+  series: Pick<TickerSeries, "dates" | "closes">,
+  signals: TickerSignal[],
+  startBar: number,
+  accountSize: number,
+  slippageBps: number
+): { equity: { date: string; equity: number }[]; stats: TickerBacktestStats } {
+  const { dates, closes } = series;
+  const slip = slippageBps / 10_000;
+  const entryAt = new Map<string, TickerSignal>();
+  const exitAt = new Map<string, TickerSignal>();
+  for (const s of signals) {
+    entryAt.set(s.entryDate, s);
+    if (s.exitDate) exitAt.set(s.exitDate, s);
+  }
+
+  let cash = accountSize;
+  let shares = 0;
+  let peak = accountSize;
+  let maxDd = 0;
+  let inMarket = 0;
+  const equity: { date: string; equity: number }[] = [];
+
+  for (let i = startBar; i < dates.length; i++) {
+    const d = dates[i];
+    const ent = entryAt.get(d);
+    if (ent && shares === 0) {
+      const price = ent.entryPrice * (1 + slip);
+      shares = cash / price;
+      cash = 0;
+    }
+    const ex = exitAt.get(d);
+    if (ex && shares > 0) {
+      cash = shares * (ex.exitPrice ?? closes[i]) * (1 - slip);
+      shares = 0;
+    }
+    if (shares > 0) inMarket++;
+    const eq = cash + shares * closes[i];
+    peak = Math.max(peak, eq);
+    maxDd = Math.max(maxDd, peak > 0 ? (peak - eq) / peak : 0);
+    equity.push({ date: d, equity: +eq.toFixed(2) });
+  }
+
+  const final = equity.length ? equity[equity.length - 1].equity : accountSize;
+  const bars = equity.length;
+  const yrs = bars / 252;
+  const cagr = yrs > 0.05 && final > 0 ? (Math.pow(final / accountSize, 1 / yrs) - 1) * 100 : 0;
+  const closed = signals.filter((s) => s.returnPct != null);
+  const rets = signals.map((s) => s.returnPct ?? s.openReturnPct ?? 0);
+  const closedRets = closed.map((s) => s.returnPct!);
+  const wins = closedRets.filter((r) => r > 0).length;
+  const dd = maxDd * 100;
+
+  return {
+    equity,
+    stats: {
+      totalReturn: +(((final - accountSize) / accountSize) * 100).toFixed(1),
+      cagr: +cagr.toFixed(1),
+      maxDrawdown: +dd.toFixed(1),
+      calmar: +(cagr / Math.max(0.1, dd)).toFixed(2),
+      trades: signals.length,
+      closedTrades: closed.length,
+      winRate: closed.length ? +((wins / closed.length) * 100).toFixed(1) : 0,
+      avgReturnPct: rets.length ? +(rets.reduce((a, b) => a + b, 0) / rets.length).toFixed(2) : 0,
+      bestPct: rets.length ? +Math.max(...rets).toFixed(2) : 0,
+      worstPct: rets.length ? +Math.min(...rets).toFixed(2) : 0,
+      avgBarsHeld: signals.length ? +(signals.reduce((a, s) => a + s.barsHeld, 0) / signals.length).toFixed(1) : 0,
+      timeInMarketPct: bars ? +((inMarket / bars) * 100).toFixed(0) : 0,
+    },
+  };
+}
+
+/**
+ * Le due strategie sullo stesso titolo, stesse date, stesso capitale: la
+ * regola esatta del replay (e quindi dell'analisi), una volta con i canali a
+ * finestra mobile e una con i canali ancorati. NON è il backtest di
+ * portafoglio: qui non c'è la classifica per forza relativa né il numero
+ * massimo di posizioni, e la protezione dai drawdown (che agisce sul
+ * portafoglio) non si applica.
+ */
+export async function runTickerBacktest(
+  ticker: string,
+  options: Omit<WorldMomentumOptions, "startDate" | "endDate"> & { years?: number }
+): Promise<TickerBacktest> {
+  const today = new Date().toISOString().slice(0, 10);
+  const base = resolveWorldOptions({ startDate: today, endDate: today, ...options } as WorldMomentumOptions);
+  const years = Math.min(10, Math.max(1, options.years ?? 5));
+
+  // Un anno in più di storico per il warm-up: il backtest copre davvero `years` anni.
+  const { series, bench, need } = await loadTickerSeries(ticker, base, years + 1);
+  const { dates, closes } = series;
+  const from = new Date();
+  from.setFullYear(from.getFullYear() - years);
+  const fromStr = from.toISOString().slice(0, 10);
+  let start = dates.findIndex((d) => d >= fromStr);
+  if (start < need) start = need;
+
+  const EXIT_TEXT: Record<AnchoredExit, string> = {
+    meta: "rottura del canale del metatitolo",
+    price: "rottura del canale del prezzo",
+    price_weekly: "rottura del prezzo confermata dal settimanale",
+    meta_rolling: "rottura del canale mobile del metatitolo",
+  };
+  const variants: { key: ChannelMode; label: string; exitLabel: string; opts: ResolvedWorldOptions }[] = [
+    {
+      key: "rolling",
+      label: "Strategia attuale",
+      exitLabel: EXIT_RULE_LABELS[base.exitRule].toLowerCase(),
+      opts: { ...base, channelMode: "rolling" },
+    },
+    {
+      key: "anchored",
+      label: "Metodo Antonio",
+      exitLabel: EXIT_TEXT[base.anchoredExit],
+      opts: { ...base, channelMode: "anchored" },
+    },
+  ];
+
+  const strategies = variants.map((v) => {
+    const signals = replayTickerSignals(series, v.opts, start);
+    const { equity, stats } = tickerEquity(series, signals, start, base.accountSize, base.slippageBps);
+    return { key: v.key, label: v.label, exitLabel: v.exitLabel, signals, equity, stats };
+  });
+
+  // Buy & hold del titolo: comprato all'apertura del primo giorno, mai venduto.
+  const bh: TickerSignal = {
+    entryDate: dates[start],
+    entryPrice: series.opens[start],
+    exitDate: null, exitPrice: null, returnPct: null,
+    barsHeld: dates.length - 1 - start,
+    exitReason: "buy & hold",
+    lastPrice: closes[closes.length - 1],
+    openReturnPct: +(((closes[closes.length - 1] - series.opens[start]) / series.opens[start]) * 100).toFixed(2),
+  };
+  const buyHold = tickerEquity(series, [bh], start, base.accountSize, base.slippageBps);
+
+  const b0 = bench[start];
+  const benchEquity = dates.slice(start).map((d, k) => ({
+    date: d,
+    equity: +((base.accountSize * bench[start + k]) / b0).toFixed(2),
+  }));
+
+  return {
+    ticker,
+    name: nameFor(ticker),
+    benchmark: base.benchmark,
+    from: dates[start],
+    to: dates[dates.length - 1],
+    years,
+    accountSize: base.accountSize,
+    strategies,
+    buyHold,
+    benchEquity,
+    benchReturn: +(((bench[bench.length - 1] - b0) / b0) * 100).toFixed(1),
+    series: dates.slice(start).map((d, k) => ({ date: d, close: +closes[start + k].toFixed(2) })),
   };
 }
 
