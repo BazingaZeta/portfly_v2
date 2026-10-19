@@ -6,6 +6,7 @@ import { runFetchJob, runSseJob, useJob, usePersistentState } from "@/lib/analys
 import { ChannelChart } from "@/components/ChannelChart";
 import { LoadingPanel } from "@/components/Loading";
 import { LivePrice, useLivePrices } from "@/components/LivePrice";
+import { WorldBuyModal, useMomentumHoldings, type MomentumHolding } from "@/components/WorldBuyModal";
 import { money } from "@/lib/format";
 import { INDICES } from "@/lib/indices";
 import type { RegressionChannel } from "@/lib/regression";
@@ -374,9 +375,10 @@ function ChannelPill({ label, st }: { label: string; st: AnchoredState }) {
 }
 
 function LeaderCard({
-  leader, params, livePrice, marketOpen,
+  leader, params, livePrice, marketOpen, held, onBuy,
 }: {
   leader: Leader; params: Params; livePrice?: number; marketOpen: boolean;
+  held?: MomentumHolding; onBuy: () => void;
 }) {
   const mc = leader.metaChannel;
   const pc = leader.priceChannel;
@@ -394,11 +396,17 @@ function LeaderCard({
   const toLower = lower != null && lower > 0 ? ((price - lower) / price) * 100 : null;
 
   return (
-    <Link
-      href={`/world-momentum/${encodeURIComponent(leader.ticker)}?${qs(params)}`}
-      className="group glass rounded-2xl p-4 flex flex-col gap-3 border border-transparent transition-all duration-150 hover:border-[var(--accent)] hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)] cursor-pointer"
-      title={`Apri l'analisi completa di ${leader.ticker}: canali, grafici e segnali storici`}
-    >
+    // Tutta la card apre il dettaglio (link steso sotto il contenuto), ma i
+    // pulsanti in fondo restano cliccabili per conto loro: un <button> dentro un
+    // <a> non è HTML valido e il clic finirebbe comunque sul link.
+    <div className={`group relative glass rounded-2xl p-4 flex flex-col gap-3 border transition-all duration-150 hover:border-[var(--accent)] hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30 ${held ? "border-[var(--accent)]/40" : "border-transparent"}`}>
+      <Link
+        href={`/world-momentum/${encodeURIComponent(leader.ticker)}?${qs(params)}`}
+        className="absolute inset-0 rounded-2xl focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)]"
+        title={`Apri l'analisi completa di ${leader.ticker}: canali, grafici e segnali storici`}
+        aria-label={`Apri l'analisi completa di ${leader.ticker}`}
+      />
+      <div className="contents pointer-events-none [&>*]:pointer-events-none">
       {/* Intestazione: chi è, forza, segnale */}
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
@@ -503,11 +511,53 @@ function LeaderCard({
 
       <p className="text-xs text-[var(--muted)] leading-snug">{leader.reason}</p>
 
-      <span className="mt-auto inline-flex items-center justify-center gap-1.5 rounded-xl py-2 text-xs font-medium bg-[var(--surface-2)] text-[var(--foreground)] group-hover:bg-[var(--accent)] group-hover:text-white transition-colors">
-        Apri analisi completa
-        <span className="transition-transform group-hover:translate-x-0.5">→</span>
-      </span>
-    </Link>
+      {held && (
+        <div className="rounded-xl border border-[var(--accent)]/30 bg-[color-mix(in_srgb,var(--accent)_8%,transparent)] px-2.5 py-2 text-[11px] flex items-center justify-between gap-2">
+          <span>
+            💼 <strong>In portafoglio</strong>{" "}
+            <span className="text-[var(--muted)] font-mono">{held.shares} az. @ {money(held.avgCost)}</span>
+          </span>
+          <span className={`font-mono ${held.unrealizedPnlPct >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>
+            {held.unrealizedPnlPct >= 0 ? "+" : ""}{held.unrealizedPnlPct}%
+          </span>
+        </div>
+      )}
+      </div>
+
+      {/* Azioni: sopra il link della card, quindi cliccabili da sole */}
+      <div className="relative z-10 mt-auto grid grid-cols-2 gap-2">
+        {held ? (
+          <Link
+            href="/portfolio-momentum"
+            className="inline-flex items-center justify-center gap-1 rounded-xl py-2 text-xs font-medium border border-[var(--accent)]/50 text-[var(--accent)] hover:bg-[var(--accent)] hover:text-white transition-colors"
+            title="Le posizioni si vendono da Portfolio Momentum"
+          >
+            Vendi in Portfolio →
+          </Link>
+        ) : (
+          <button
+            onClick={onBuy}
+            className={`inline-flex items-center justify-center gap-1 rounded-xl py-2 text-xs font-semibold transition-colors ${
+              leader.signal === "COMPRA"
+                ? "bg-[var(--positive)] text-white hover:brightness-110"
+                : "border border-[var(--border)] text-[var(--muted)] hover:text-[var(--foreground)] hover:border-[var(--foreground)]"
+            }`}
+            title={leader.signal === "COMPRA" ? `Compra ${leader.ticker}` : `Il segnale è ${leader.signal}: puoi comprare lo stesso, contro la strategia`}
+          >
+            {leader.signal === "COMPRA" ? `Compra ${leader.ticker}` : "Compra comunque"}
+          </button>
+        )}
+        {/* Link vero: la riga dei pulsanti sta sopra il link della card, quindi
+            un'etichetta qui non farebbe passare il clic a nessuno. */}
+        <Link
+          href={`/world-momentum/${encodeURIComponent(leader.ticker)}?${qs(params)}`}
+          className="inline-flex items-center justify-center gap-1.5 rounded-xl py-2 text-xs font-medium bg-[var(--surface-2)] text-[var(--foreground)] group-hover:bg-[var(--accent)] group-hover:text-white transition-colors"
+        >
+          Analisi completa
+          <span className="transition-transform group-hover:translate-x-0.5">→</span>
+        </Link>
+      </div>
+    </div>
   );
 }
 
@@ -535,6 +585,9 @@ function AnalysisPanel({ params }: { params: Params }) {
   const ranWith = (job.meta?.qs as string | undefined) ?? null;
   const stale = data != null && ranWith != null && ranWith !== qs(params);
   const [filter, setFilter] = usePersistentState<"all" | "buy" | "strong">("world:analyze:filter", "strong");
+  const { holdings, reload: reloadHoldings } = useMomentumHoldings();
+  const [buying, setBuying] = useState<Leader | null>(null);
+  const [bought, setBought] = useState<string | null>(null);
 
   const run = useCallback(() => {
     runSseJob<Analysis>(ANALYSIS_KEY, `/api/world/analyze?${qs(params)}`, { qs: qs(params) });
@@ -631,6 +684,18 @@ function AnalysisPanel({ params }: { params: Params }) {
             ))}
           </div>
 
+          {bought && (
+            <div className="glass rounded-2xl p-3 mb-4 text-xs flex items-center justify-between gap-3 flex-wrap" style={{ borderLeft: "3px solid var(--positive)" }}>
+              <span>
+                ✓ <strong>{bought}</strong> comprato: è in Portfolio Momentum, con l&apos;etichetta Momentum World.
+              </span>
+              <span className="flex items-center gap-3">
+                <Link href="/portfolio-momentum" className="text-[var(--accent)] hover:underline">Vai al portafoglio →</Link>
+                <button className="text-[var(--muted)] hover:text-[var(--foreground)]" onClick={() => setBought(null)} aria-label="Chiudi">✕</button>
+              </span>
+            </div>
+          )}
+
           {shown.length === 0 ? (
             <div className="glass rounded-2xl p-6 text-center text-sm text-[var(--muted)]">
               Nessun titolo in questa categoria oggi. Non è un errore: quando nessun metatitolo è
@@ -639,9 +704,31 @@ function AnalysisPanel({ params }: { params: Params }) {
           ) : (
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               {shown.map((l) => (
-                <LeaderCard key={l.ticker} leader={l} params={params} livePrice={live[l.ticker]} marketOpen={market.open} />
+                <LeaderCard
+                  key={l.ticker} leader={l} params={params} livePrice={live[l.ticker]} marketOpen={market.open}
+                  held={holdings[l.ticker]} onBuy={() => setBuying(l)}
+                />
               ))}
             </div>
+          )}
+
+          {buying && (
+            <WorldBuyModal
+              target={{
+                ticker: buying.ticker,
+                name: buying.name,
+                price: live[buying.ticker] ?? buying.price,
+                signal: buying.signal,
+                reason: buying.reason,
+                stop: buying.anchoredNow?.price.lower ?? null,
+              }}
+              indexKey={params.index}
+              maxPositions={params.maxPositions}
+              exposurePct={data.exposure?.pct ?? 100}
+              strategyLabel={params.channelMode === "anchored" ? "metodo Antonio" : "strategia attuale"}
+              onClose={() => setBuying(null)}
+              onDone={() => { setBought(buying.ticker); reloadHoldings(); }}
+            />
           )}
         </>
       )}
