@@ -33,6 +33,7 @@ interface Position {
 
 interface MomentumTrade {
   id: number;
+  indexKey?: string;
   ticker: string;
   name: string;
   action: string;
@@ -60,7 +61,7 @@ function PositionsPanel({
       <section className="mb-6 rounded-xl border border-dashed border-[var(--border)] p-10 text-center text-[var(--muted)]">
         <p className="text-4xl mb-3">⚡</p>
         <p className="font-medium mb-1">Nessuna posizione aperta</p>
-        <p className="text-sm">Compra un titolo dalla pagina Momentum RS per vederlo qui.</p>
+        <p className="text-sm">Compra un titolo da Momentum RS o da Momentum World per vederlo qui.</p>
       </section>
     );
   }
@@ -81,7 +82,7 @@ function PositionsPanel({
       <section className="mb-6">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-medium text-[var(--muted)] uppercase tracking-wide flex items-center gap-2">
-            ⚡ Posizioni aperte (Momentum RS)
+            ⚡ Posizioni aperte (Momentum RS e Momentum World)
             {market && <LiveBadge market={market} />}
           </h2>
           <div className="flex items-center gap-4 text-sm">
@@ -116,7 +117,23 @@ function PositionsPanel({
                   return (
                   <tr key={p.ticker} className={`border-b border-[var(--border)] last:border-0 ${p.stopHit ? "bg-[var(--negative)]/5" : p.targetHit ? "bg-[var(--positive)]/5" : ""}`}>
                     <td className="px-4 py-3">
-                      <div className="font-semibold">{p.ticker}</div>
+                      <div className="font-semibold flex items-center gap-1.5">
+                        {p.ticker}
+                        {/* Da dove arriva: le posizioni comprate da Momentum World hanno indice MOMENTUM_WORLD_… */}
+                        {p.indexKey.startsWith("MOMENTUM_WORLD_") ? (
+                          <a
+                            href={`/world-momentum/${encodeURIComponent(p.ticker)}`}
+                            className="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-[var(--accent)]/15 text-[var(--accent)] hover:underline"
+                            title="Comprata da Momentum World: apri l'analisi del titolo"
+                          >
+                            WORLD
+                          </a>
+                        ) : (
+                          <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-[var(--surface-2)] text-[var(--muted)]" title="Comprata da Momentum RS">
+                            RS
+                          </span>
+                        )}
+                      </div>
                       <div className="text-[11px] text-[var(--muted)] truncate max-w-[120px]">{p.name}</div>
                       {p.stopHit && <span className="text-[10px] text-[var(--negative)] font-medium">⛔ Stop colpito</span>}
                       {p.targetHit && <span className="text-[10px] text-[var(--positive)] font-medium">🎯 Target raggiunto</span>}
@@ -195,7 +212,7 @@ function PerformancePanel({
   return (
     <section className="mb-6">
       <h2 className="text-sm font-medium text-[var(--muted)] uppercase tracking-wide mb-3">
-        📈 Performance (Momentum RS)
+        📈 Performance (Momentum RS e World)
       </h2>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {[
@@ -235,7 +252,7 @@ function TradeHistoryPanel({ trades }: { trades: MomentumTrade[] }) {
   return (
     <section className="mb-6">
       <h2 className="text-sm font-medium text-[var(--muted)] uppercase tracking-wide mb-3">
-        📋 Storico operazioni (Momentum RS)
+        📋 Storico operazioni (Momentum RS e World)
       </h2>
       <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] overflow-hidden">
         <div className="overflow-x-auto">
@@ -258,6 +275,9 @@ function TradeHistoryPanel({ trades }: { trades: MomentumTrade[] }) {
                   </td>
                   <td className="px-4 py-2.5">
                     <span className="font-semibold">{t.ticker}</span>
+                    {t.indexKey?.startsWith("MOMENTUM_WORLD_") && (
+                      <span className="ml-1 text-[9px] font-semibold px-1 py-0.5 rounded bg-[var(--accent)]/15 text-[var(--accent)]">WORLD</span>
+                    )}
                     <span className="ml-1 text-xs text-[var(--muted)] hidden sm:inline">{t.name}</span>
                   </td>
                   <td className="px-4 py-2.5">
@@ -340,9 +360,10 @@ export default function PortfolioMomentumPage() {
   return (
     <div className="max-w-5xl mx-auto">
       <header className="mb-6">
-        <h1 className="text-3xl font-bold tracking-tight gradient-text">⚡ Portfolio Momentum RS</h1>
+        <h1 className="text-3xl font-bold tracking-tight gradient-text">⚡ Portfolio Momentum</h1>
         <p className="text-sm text-[var(--muted)] mt-1 max-w-2xl">
-          Posizioni e performance della strategia Momentum RS (forza relativa contro l&apos;indice).
+          Posizioni e performance di Momentum RS e Momentum World: l&apos;etichetta accanto al titolo dice
+          da quale sezione è stato comprato. Le vendite si fanno da qui.
         </p>
       </header>
 

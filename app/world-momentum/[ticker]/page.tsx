@@ -8,7 +8,8 @@ import { MultiEquityChart } from "@/components/MultiEquityChart";
 import { useLivePrices } from "@/components/LivePrice";
 import { LoadingPanel } from "@/components/Loading";
 import { money } from "@/lib/format";
-import { runFetchJob, useJob, usePersistentState } from "@/lib/analysisStore";
+import { getJob, runFetchJob, useJob, usePersistentState } from "@/lib/analysisStore";
+import { WorldBuyModal, useMomentumHoldings } from "@/components/WorldBuyModal";
 import type {
   WorldTickerDetail, ChannelDetail, TickerSignalHistory, AnchoredNow, TickerSignal, TickerBacktest, TickerBacktestStats,
 } from "@/lib/worldMomentum";
@@ -473,6 +474,9 @@ export default function TickerDetailPage() {
   const [pinnedDate, setPinnedDate] = useState<string | null>(null);
   const { prices: live } = useLivePrices(data ? [data.ticker] : [], 30_000);
   const livePrice = data ? live[data.ticker] : undefined;
+  const { holdings, reload: reloadHoldings } = useMomentumHoldings();
+  const [buying, setBuying] = useState(false);
+  const [bought, setBought] = useState(false);
 
   // Asse temporale condiviso: le ultime N date dello storico allineato.
   const domain = useMemo(() => {
@@ -554,9 +558,57 @@ export default function TickerDetailPage() {
               <span className="px-3 py-1 rounded-lg text-xs font-semibold" style={signalStyle(data.signal)}>
                 {data.signal}
               </span>
-              <p className="text-xs text-[var(--muted)] mt-2 max-w-sm">{data.reason}</p>
+              <p className="text-xs text-[var(--muted)] mt-2 max-w-sm ml-auto">{data.reason}</p>
+              <div className="mt-3 flex justify-end">
+                {holdings[data.ticker] ? (
+                  <Link
+                    href="/portfolio-momentum"
+                    className="inline-flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-medium border border-[var(--accent)]/50 text-[var(--accent)] hover:bg-[var(--accent)] hover:text-white transition-colors"
+                  >
+                    💼 In portafoglio ({holdings[data.ticker].shares} az.,{" "}
+                    {holdings[data.ticker].unrealizedPnlPct >= 0 ? "+" : ""}{holdings[data.ticker].unrealizedPnlPct}%) · Vendi in Portfolio →
+                  </Link>
+                ) : (
+                  <button
+                    onClick={() => setBuying(true)}
+                    className={`rounded-xl px-4 py-2 text-xs font-semibold transition-colors ${
+                      data.signal === "COMPRA"
+                        ? "bg-[var(--positive)] text-white hover:brightness-110"
+                        : "border border-[var(--border)] text-[var(--muted)] hover:text-[var(--foreground)] hover:border-[var(--foreground)]"
+                    }`}
+                  >
+                    {data.signal === "COMPRA" ? `Compra ${data.ticker}` : "Compra comunque"}
+                  </button>
+                )}
+              </div>
+              {bought && (
+                <p className="text-xs text-[var(--positive)] mt-2">
+                  ✓ Comprato: lo trovi in <Link href="/portfolio-momentum" className="underline">Portfolio Momentum</Link>.
+                </p>
+              )}
             </div>
           </header>
+
+          {buying && (
+            <WorldBuyModal
+              target={{
+                ticker: data.ticker,
+                name: data.name,
+                price: livePrice ?? data.price,
+                signal: data.signal,
+                reason: data.reason,
+                stop: anchoredMode ? data.anchored.now.price.lower : null,
+              }}
+              indexKey={search.get("index") ?? "SP500"}
+              maxPositions={Number(search.get("maxPositions")) || 5}
+              // L'esposizione la calcola l'analisi del portafoglio: se è in memoria la si
+              // usa, altrimenti si propone la quantità piena.
+              exposurePct={(getJob<{ exposure?: { pct: number } }>("world:analyze").result?.exposure?.pct) ?? 100}
+              strategyLabel={anchoredMode ? "metodo Antonio" : "strategia attuale"}
+              onClose={() => setBuying(false)}
+              onDone={() => { setBought(true); reloadHoldings(); }}
+            />
+          )}
 
           <div
             className="glass rounded-2xl p-3 text-xs text-[var(--muted)]"
