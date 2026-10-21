@@ -7,6 +7,7 @@ import { ChannelChart } from "@/components/ChannelChart";
 import { LoadingPanel } from "@/components/Loading";
 import { LivePrice, useLivePrices } from "@/components/LivePrice";
 import { WorldBuyModal, useMomentumHoldings, type MomentumHolding } from "@/components/WorldBuyModal";
+import { ZoomableLines, type DateRange, type ZoomLine } from "@/components/ZoomableLines";
 import { money } from "@/lib/format";
 import { INDICES } from "@/lib/indices";
 import type { RegressionChannel } from "@/lib/regression";
@@ -739,56 +740,6 @@ function AnalysisPanel({ params }: { params: Params }) {
 // ─── Grafici del backtest ────────────────────────────────────────────────────
 
 /** Curva equity (mark-to-market) contro il benchmark, e opzionalmente la versione senza protezione. */
-function EquityChart({
-  strategy, bench, base, compare, labels,
-}: {
-  strategy: { date: string; equity: number }[];
-  bench: { date: string; equity: number }[];
-  base: number;
-  compare?: { date: string; equity: number }[];
-  /** Nomi delle due linee quando c'è un confronto. */
-  labels?: { strategy: string; compare: string };
-}) {
-  if (strategy.length < 2) return null;
-  const W = 720, H = 220, PAD = { t: 14, r: 14, b: 26, l: 62 };
-  const iw = W - PAD.l - PAD.r, ih = H - PAD.t - PAD.b;
-  const all = [...strategy, ...bench, ...(compare ?? [])].map((p) => p.equity).concat(base);
-  const min = Math.min(...all) * 0.98, max = Math.max(...all) * 1.02;
-  const x = (i: number, n: number) => PAD.l + (i / Math.max(1, n - 1)) * iw;
-  const y = (v: number) => PAD.t + ((max - v) / (max - min || 1)) * ih;
-  const path = (pts: { equity: number }[]) => pts.map((p, i) => `${x(i, pts.length)},${y(p.equity)}`).join(" ");
-
-  return (
-    <div>
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="Curva di equity">
-        {[0, 0.25, 0.5, 0.75, 1].map((f) => {
-          const v = min + (max - min) * f;
-          return (
-            <g key={f}>
-              <line x1={PAD.l} x2={W - PAD.r} y1={y(v)} y2={y(v)} stroke="var(--border)" strokeWidth="0.5" />
-              <text x={PAD.l - 6} y={y(v) + 3} textAnchor="end" fontSize="9" fill="var(--muted)">
-                {Math.round(v).toLocaleString("it-IT")}
-              </text>
-            </g>
-          );
-        })}
-        <line x1={PAD.l} x2={W - PAD.r} y1={y(base)} y2={y(base)} stroke="var(--muted)" strokeWidth="0.8" strokeDasharray="3 3" opacity="0.5" />
-        <polyline points={path(bench)} fill="none" stroke="var(--muted)" strokeWidth="1.5" strokeDasharray="5 4" />
-        {compare && compare.length > 1 && (
-          <polyline points={path(compare)} fill="none" stroke="var(--warning)" strokeWidth="1.5" opacity="0.75" strokeLinejoin="round" />
-        )}
-        <polyline points={path(strategy)} fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinejoin="round" />
-      </svg>
-      {/* Legenda fuori dal disegno: dentro, finiva sopra i picchi della curva. */}
-      <div className="flex flex-wrap gap-x-5 gap-y-1 text-[11px] mt-2 px-1">
-        <span className="flex items-center gap-1.5"><span className="inline-block w-4 h-0.5 bg-[var(--accent)]" />{compare ? labels?.strategy ?? "con protezione dai drawdown" : "strategia"}</span>
-        {compare && <span className="flex items-center gap-1.5"><span className="inline-block w-4 h-0.5 bg-[var(--warning)]" />{labels?.compare ?? "senza protezione"}</span>}
-        <span className="flex items-center gap-1.5 text-[var(--muted)]"><span className="inline-block w-4 border-t border-dashed border-[var(--muted)]" />benchmark</span>
-      </div>
-    </div>
-  );
-}
-
 /** Serie di drawdown (%) dal massimo precedente. */
 function drawdownSeries(eq: { date: string; equity: number }[]): { date: string; dd: number }[] {
   let peak = -Infinity;
@@ -796,97 +747,6 @@ function drawdownSeries(eq: { date: string; equity: number }[]): { date: string;
     peak = Math.max(peak, p.equity);
     return { date: p.date, dd: peak > 0 ? ((p.equity - peak) / peak) * 100 : 0 };
   });
-}
-
-/**
- * Curva "sott'acqua": quanto si è sotto il massimo precedente, giorno per
- * giorno. È la vista diretta dei picchi che poi cadono — ogni avvallamento è
- * un drawdown, la profondità è quanto fa male, la larghezza quanto dura.
- */
-function DrawdownChart({
-  series,
-}: {
-  series: { label: string; color: string; eq: { date: string; equity: number }[] }[];
-}) {
-  const dds = series.map((s) => ({ ...s, dd: drawdownSeries(s.eq) }));
-  const n = Math.max(...dds.map((d) => d.dd.length));
-  if (n < 2) return null;
-  const W = 720, H = 180, PAD = { t: 10, r: 14, b: 22, l: 52 };
-  const iw = W - PAD.l - PAD.r, ih = H - PAD.t - PAD.b;
-  const worst = Math.min(...dds.flatMap((d) => d.dd.map((p) => p.dd)), -1);
-  const lo = Math.floor(worst / 5) * 5;
-  const x = (i: number, len: number) => PAD.l + (i / Math.max(1, len - 1)) * iw;
-  const y = (v: number) => PAD.t + (v / lo) * ih;
-  const ticks = Array.from({ length: Math.round(-lo / 5) + 1 }, (_, i) => -i * 5).filter((v, i, a) => a.length <= 7 || i % 2 === 0);
-
-  return (
-    <div>
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="Curva di drawdown">
-        {ticks.map((v) => (
-          <g key={v}>
-            <line x1={PAD.l} x2={W - PAD.r} y1={y(v)} y2={y(v)} stroke="var(--border)" strokeWidth="0.5" />
-            <text x={PAD.l - 6} y={y(v) + 3} textAnchor="end" fontSize="9" fill="var(--muted)">{v}%</text>
-          </g>
-        ))}
-        {dds.map((d, k) => (
-          <g key={k}>
-            <path
-              d={`M ${x(0, d.dd.length)} ${y(0)} ` + d.dd.map((p, i) => `L ${x(i, d.dd.length)} ${y(p.dd)}`).join(" ") + ` L ${x(d.dd.length - 1, d.dd.length)} ${y(0)} Z`}
-              fill={d.color}
-              opacity={k === dds.length - 1 ? 0.22 : 0.12}
-            />
-            <polyline
-              points={d.dd.map((p, i) => `${x(i, d.dd.length)},${y(p.dd)}`).join(" ")}
-              fill="none" stroke={d.color} strokeWidth={k === dds.length - 1 ? 1.6 : 1.2}
-            />
-          </g>
-        ))}
-      </svg>
-      <div className="flex flex-wrap gap-x-5 gap-y-1 text-[11px] mt-2 px-1">
-        {dds.map((d) => {
-          const w = Math.min(...d.dd.map((p) => p.dd));
-          return (
-            <span key={d.label} className="flex items-center gap-1.5">
-              <span className="inline-block w-4 h-0.5" style={{ background: d.color }} />
-              {d.label}: peggiore <strong className="font-mono">{w.toFixed(1)}%</strong>
-            </span>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-/**
- * Passaggio 5: P&L REALIZZATO cumulato. A differenza dell'equity, questa curva
- * si muove solo quando una posizione si chiude — è la scala dei soldi
- * effettivamente incassati, senza il rumore delle posizioni ancora aperte.
- */
-function RealizedChart({ points }: { points: { date: string; realized: number }[] }) {
-  if (points.length < 2) return null;
-  const W = 720, H = 180, PAD = { t: 14, r: 14, b: 26, l: 62 };
-  const iw = W - PAD.l - PAD.r, ih = H - PAD.t - PAD.b;
-  const vals = points.map((p) => p.realized);
-  const min = Math.min(0, ...vals) * 1.05, max = Math.max(0, ...vals) * 1.05;
-  const x = (i: number) => PAD.l + (i / Math.max(1, points.length - 1)) * iw;
-  const y = (v: number) => PAD.t + ((max - v) / (max - min || 1)) * ih;
-  const last = vals[vals.length - 1];
-  const color = last >= 0 ? "var(--positive)" : "var(--negative)";
-
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="P&L realizzato cumulato">
-      <line x1={PAD.l} x2={W - PAD.r} y1={y(0)} y2={y(0)} stroke="var(--border)" strokeWidth="1" />
-      <text x={PAD.l - 6} y={y(0) + 3} textAnchor="end" fontSize="9" fill="var(--muted)">0</text>
-      <text x={PAD.l - 6} y={y(max) + 8} textAnchor="end" fontSize="9" fill="var(--muted)">
-        {Math.round(max).toLocaleString("it-IT")}
-      </text>
-      <path
-        d={`M ${x(0)} ${y(0)} ` + points.map((p, i) => `L ${x(i)} ${y(p.realized)}`).join(" ") + ` L ${x(points.length - 1)} ${y(0)} Z`}
-        fill={color} opacity="0.12"
-      />
-      <polyline points={points.map((p, i) => `${x(i)},${y(p.realized)}`).join(" ")} fill="none" stroke={color} strokeWidth="2" />
-    </svg>
-  );
 }
 
 /**
@@ -1230,6 +1090,131 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: "po
   );
 }
 
+/**
+ * I tre grafici del backtest (equity, drawdown, P&L realizzato) con zoom e
+ * cursore condivisi: si trascina su uno qualsiasi per ingrandire un periodo,
+ * e gli altri seguono. Sopra, il rendimento di ogni linea nel periodo scelto.
+ */
+function BacktestCharts({ result }: { result: BacktestResult }) {
+  const [range, setRange] = useState<DateRange>(null);
+  const [hover, setHover] = useState<string | null>(null);
+
+  const ab = result.comparison?.kind === "previous_strategy";
+  const mainLabel = !result.comparison ? "strategia" : ab ? "canali ancorati" : "con protezione";
+  const cmpLabel = ab ? "strategia attuale" : "senza protezione";
+  const toLine = (eq: { date: string; equity: number }[]) => eq.map((p) => ({ date: p.date, value: p.equity }));
+  const ddLine = (eq: { date: string; equity: number }[]) => drawdownSeries(eq).map((p) => ({ date: p.date, value: p.dd }));
+
+  const equityLines: ZoomLine[] = useMemo(() => [
+    { label: "benchmark", color: "var(--muted)", points: toLine(result.benchEquity), dashed: true },
+    ...(result.comparison ? [{ label: cmpLabel, color: "var(--warning)", points: toLine(result.comparison.equity) }] : []),
+    { label: mainLabel, color: "var(--accent)", points: toLine(result.equity), strong: true },
+  ], [result, cmpLabel, mainLabel]);
+  const ddLines: ZoomLine[] = useMemo(() => [
+    { label: "benchmark", color: "var(--muted)", points: ddLine(result.benchEquity), fill: true },
+    ...(result.comparison ? [{ label: cmpLabel, color: "var(--warning)", points: ddLine(result.comparison.equity), fill: true }] : []),
+    { label: mainLabel, color: "var(--accent)", points: ddLine(result.equity), fill: true, strong: true },
+  ], [result, cmpLabel, mainLabel]);
+  const realizedLines: ZoomLine[] = useMemo(() => {
+    const last = result.realizedCurve[result.realizedCurve.length - 1]?.realized ?? 0;
+    return [{
+      label: "P&L realizzato", color: last >= 0 ? "var(--positive)" : "var(--negative)",
+      points: result.realizedCurve.map((p) => ({ date: p.date, value: p.realized })), fill: true, strong: true,
+    }];
+  }, [result]);
+
+  const dates = useMemo(() => result.equity.map((p) => p.date), [result]);
+  const presets = [
+    { key: "3M", bars: 63 }, { key: "6M", bars: 126 }, { key: "1A", bars: 252 }, { key: "2A", bars: 504 },
+  ].filter((p) => p.bars < dates.length);
+  const from = range?.from ?? dates[0];
+  const to = range?.to ?? dates[dates.length - 1];
+
+  // Rendimento di ogni curva di equity fra l'inizio e la fine del periodo scelto.
+  const periodReturns = equityLines.map((l) => {
+    const a = l.points.find((p) => p.date >= from);
+    let b: { date: string; value: number } | undefined;
+    for (const p of l.points) { if (p.date > to) break; b = p; }
+    return { label: l.label, color: l.color, pct: a && b && a.value > 0 ? ((b.value - a.value) / a.value) * 100 : null };
+  }).reverse();
+
+  const money0 = (v: number) => `$${Math.round(v).toLocaleString("it-IT")}`;
+
+  return (
+    <div className="flex flex-col gap-5">
+      {/* Barra del periodo: comanda tutti e tre i grafici. Sticky, così resta a portata mentre scorri. */}
+      <div className="sticky top-10 z-20 rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-lg shadow-black/30 p-3 flex items-center gap-x-4 gap-y-2 flex-wrap">
+        <div className="flex gap-1">
+          {presets.map((p) => {
+            const f = dates[dates.length - p.bars];
+            const active = range?.from === f && range?.to === dates[dates.length - 1];
+            return (
+              <button key={p.key} onClick={() => setRange({ from: f, to: dates[dates.length - 1] })}
+                className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${active ? "bg-[var(--surface-2)] text-[var(--foreground)]" : "text-[var(--muted)] hover:text-[var(--foreground)]"}`}>
+                {p.key}
+              </button>
+            );
+          })}
+          <button onClick={() => setRange(null)}
+            className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${!range ? "bg-[var(--surface-2)] text-[var(--foreground)]" : "text-[var(--muted)] hover:text-[var(--foreground)]"}`}>
+            Tutto
+          </button>
+        </div>
+        <span className="text-[11px] font-mono text-[var(--muted)]">{from} → {to}</span>
+        <span className="flex flex-wrap gap-x-4 gap-y-1 text-[11px]">
+          {periodReturns.map((r) => (
+            <span key={r.label} className="flex items-center gap-1.5">
+              <span className="inline-block w-3" style={{ borderTop: `2px solid ${r.color}` }} />
+              <span className="text-[var(--muted)]">{r.label}</span>
+              <span className={`font-mono ${r.pct == null ? "" : r.pct >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>
+                {r.pct == null ? "—" : `${r.pct >= 0 ? "+" : ""}${r.pct.toFixed(1)}%`}
+              </span>
+            </span>
+          ))}
+        </span>
+        <span className="text-[11px] text-[var(--muted)] ml-auto">Trascina su un grafico per ingrandire · doppio clic per tornare a tutto</span>
+      </div>
+
+      <section>
+        <h3 className="text-sm font-semibold mb-2">Equity contro benchmark</h3>
+        <div className="glass rounded-2xl p-4">
+          <ZoomableLines lines={equityLines} range={range} onRange={setRange} hoverDate={hover} onHover={setHover}
+            formatY={money0} baseline={10_000} height={280} />
+        </div>
+      </section>
+
+      <section>
+        <h3 className="text-sm font-semibold mb-1">Drawdown nel tempo</h3>
+        <p className="text-xs text-[var(--muted)] mb-2">
+          Quanto si è sotto il massimo precedente, giorno per giorno: ogni avvallamento è un
+          picco che poi cade. La profondità è quanto fa male, la larghezza quanto dura.
+        </p>
+        <div className="glass rounded-2xl p-4">
+          <ZoomableLines lines={ddLines} range={range} onRange={setRange} hoverDate={hover} onHover={setHover}
+            formatY={(v) => `${v.toFixed(1)}%`} zeroTop height={220} />
+          <div className="flex flex-wrap gap-x-5 gap-y-1 text-[11px] mt-1 px-1 text-[var(--muted)]">
+            {ddLines.map((l) => {
+              const w = Math.min(...l.points.map((p) => p.value));
+              return <span key={l.label}>{l.label}: peggiore di sempre <strong className="font-mono text-[var(--foreground)]">{w.toFixed(1)}%</strong></span>;
+            })}
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h3 className="text-sm font-semibold mb-1">P&amp;L realizzato nel tempo</h3>
+        <p className="text-xs text-[var(--muted)] mb-2">
+          Si muove solo alla chiusura di una posizione: sono i soldi incassati, non il valore a mercato.
+        </p>
+        <div className="glass rounded-2xl p-4">
+          <ZoomableLines lines={realizedLines} range={range} onRange={setRange} hoverDate={hover} onHover={setHover}
+            formatY={money0} baseline={0} height={200} />
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function BacktestPanel({ params }: { params: Params }) {
   const job = useJob<BacktestResult>(BACKTEST_KEY);
   const result = job.result ?? null;
@@ -1310,53 +1295,7 @@ function BacktestPanel({ params }: { params: Params }) {
             <ComparisonPanel result={result} />
           )}
 
-          <section>
-            <h3 className="text-sm font-semibold mb-2">Equity contro benchmark</h3>
-            <div className="glass rounded-2xl p-4">
-              <EquityChart
-                strategy={result.equity}
-                bench={result.benchEquity}
-                base={10_000}
-                compare={result.comparison?.equity}
-                labels={result.comparison?.kind === "previous_strategy"
-                  ? { strategy: "canali ancorati", compare: "strategia attuale" }
-                  : undefined}
-              />
-            </div>
-          </section>
-
-          <section>
-            <h3 className="text-sm font-semibold mb-1">Drawdown nel tempo</h3>
-            <p className="text-xs text-[var(--muted)] mb-2">
-              Quanto si è sotto il massimo precedente, giorno per giorno: ogni avvallamento è un
-              picco che poi cade. La profondità è quanto fa male, la larghezza quanto dura.
-            </p>
-            <div className="glass rounded-2xl p-4">
-              <DrawdownChart
-                series={[
-                  { label: "benchmark", color: "var(--muted)", eq: result.benchEquity },
-                  ...(result.comparison
-                    ? [{ label: result.comparison.kind === "previous_strategy" ? "strategia attuale" : "senza protezione", color: "var(--warning)", eq: result.comparison.equity }]
-                    : []),
-                  {
-                    label: !result.comparison ? "strategia" : result.comparison.kind === "previous_strategy" ? "canali ancorati" : "con protezione",
-                    color: "var(--accent)",
-                    eq: result.equity,
-                  },
-                ]}
-              />
-            </div>
-          </section>
-
-          <section>
-            <h3 className="text-sm font-semibold mb-1">P&amp;L realizzato nel tempo</h3>
-            <p className="text-xs text-[var(--muted)] mb-2">
-              Si muove solo alla chiusura di una posizione: sono i soldi incassati, non il valore a mercato.
-            </p>
-            <div className="glass rounded-2xl p-4">
-              <RealizedChart points={result.realizedCurve} />
-            </div>
-          </section>
+          <BacktestCharts result={result} />
 
           <section>
             <h3 className="text-sm font-semibold mb-1">P&amp;L realizzato per titolo</h3>
