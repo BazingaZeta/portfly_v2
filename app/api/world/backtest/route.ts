@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runWorldMomentum, channelParams, WORLD_BENCHMARK_INCEPTION, type ExitRule } from "@/lib/worldMomentum";
+import { runWorldMomentum, channelParams, marketParams, WORLD_BENCHMARK, WORLD_BENCHMARK_INCEPTION, type ExitRule } from "@/lib/worldMomentum";
 import { getSession } from "@/lib/auth";
 
 export const runtime = "nodejs";
@@ -23,10 +23,12 @@ export async function GET(req: NextRequest) {
   const end = new Date();
   const start = new Date();
   start.setFullYear(start.getFullYear() - years);
-  // Il benchmark non esiste prima del 2012: meglio accorciare la finestra che
-  // restituire un errore quando l'utente chiede più storico di quanto ce ne sia.
+  // URTH (MSCI World) non esiste prima del 2012: meglio accorciare la finestra
+  // che restituire un errore quando si chiede più storico di quanto ce ne sia.
+  // Gli altri benchmark (SPY, QQQ, DIA) hanno storico ben più lungo.
+  const { benchmark } = marketParams(req.nextUrl.searchParams);
   const startDate =
-    start.toISOString().slice(0, 10) < WORLD_BENCHMARK_INCEPTION
+    benchmark === WORLD_BENCHMARK && start.toISOString().slice(0, 10) < WORLD_BENCHMARK_INCEPTION
       ? WORLD_BENCHMARK_INCEPTION
       : start.toISOString().slice(0, 10);
 
@@ -40,6 +42,7 @@ export async function GET(req: NextRequest) {
       endDate: end.toISOString().slice(0, 10),
       exitRule,
       ...channelParams(req.nextUrl.searchParams),
+      ...marketParams(req.nextUrl.searchParams),
       accountSize: num(req, "accountSize", 10_000),
       maxPositions: num(req, "maxPositions", 5),
       metaWindow: num(req, "metaWindow", 60),

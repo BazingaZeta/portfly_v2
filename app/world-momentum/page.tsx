@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { Fragment, useCallback, useMemo, useState } from "react";
 import Link from "next/link";
 import { runFetchJob, runSseJob, useJob, usePersistentState } from "@/lib/analysisStore";
 import { ChannelChart } from "@/components/ChannelChart";
@@ -8,6 +8,7 @@ import { LoadingPanel } from "@/components/Loading";
 import { LivePrice, useLivePrices } from "@/components/LivePrice";
 import { WorldBuyModal, useMomentumHoldings, type MomentumHolding } from "@/components/WorldBuyModal";
 import { ZoomableLines, type DateRange, type ZoomLine } from "@/components/ZoomableLines";
+import { backtestPortfolio } from "@/lib/backtestPortfolio";
 import { money } from "@/lib/format";
 import { INDICES } from "@/lib/indices";
 import type { RegressionChannel } from "@/lib/regression";
@@ -83,19 +84,25 @@ interface BacktestResult {
     barsHeld: number; outcome: string;
   }[];
   perTicker: TickerRow[];
+  endPrices: Record<string, { close: number; prevClose: number }>;
+  names: Record<string, string>;
   rankingHistory: { date: string; strong: string[]; entered: string[]; exited: string[] }[];
   walkForward?: {
-    periods: { start: string; end: string; summary: { totalReturn: number; profitFactor: number; trades: number } }[];
+    periods: { start: string; end: string; summary: { totalReturn: number; profitFactor: number; trades: number; maxDrawdown: number } }[];
     worstProfitFactor: number;
     positivePeriods: number;
   };
-  /**
-   * Il termine di paragone sugli stessi dati: la strategia precedente (A/B dei
-   * canali ancorati) o la stessa strategia senza protezione dai drawdown.
-   */
+  /** L'altra strategia (finestra mobile ↔ canali ancorati), sugli stessi dati. */
   comparison?: {
-    kind: "previous_strategy" | "no_vol_target";
+    kind: "other_strategy";
+    channelMode: ChannelMode;
     label: string;
+    summary: BacktestResult["summary"];
+    equity: { date: string; equity: number }[];
+    walkForward?: BacktestResult["walkForward"];
+  };
+  /** La strategia selezionata senza protezione dai drawdown. */
+  protection?: {
     summary: BacktestResult["summary"];
     equity: { date: string; equity: number }[];
     walkForward?: BacktestResult["walkForward"];
@@ -128,6 +135,25 @@ interface Params {
   channelMode: ChannelMode;
   /** Canali ancorati: quale rottura chiude la posizione. */
   anchoredExit: string;
+  /** Benchmark del metatitolo, del regime e del confronto: un ticker o "AUTO" (segue l'indice). */
+  benchmark: string;
+  /** Giorni della media mobile del filtro di regime. */
+  regimeSma: number;
+}
+
+/** Benchmark selezionabili. "AUTO" sceglie quello dell'indice analizzato. */
+const BENCHMARK_OPTIONS: Record<string, string> = {
+  URTH: "MSCI World (validato)",
+  AUTO: "Automatico — segue l'indice",
+  SPY: "S&P 500",
+  QQQ: "Nasdaq 100",
+  DIA: "Dow Jones 30",
+};
+const BENCHMARK_NAMES: Record<string, string> = { URTH: "MSCI World", SPY: "S&P 500", QQQ: "Nasdaq 100", DIA: "Dow Jones 30" };
+/** Il benchmark effettivo, come lo risolve il server per "AUTO". */
+function effectiveBenchmark(p: Params): string {
+  if (p.benchmark !== "AUTO") return p.benchmark;
+  return p.index === "NDX" ? "QQQ" : p.index === "DJIA" ? "DIA" : "SPY";
 }
 
 const DEFAULTS: Params = {
@@ -144,6 +170,8 @@ const DEFAULTS: Params = {
   volTarget: 20,
   channelMode: "rolling",
   anchoredExit: "meta",
+  benchmark: "URTH",
+  regimeSma: 200,
 };
 
 /** Perché si è chiusa una riga del registro: vedi WorldExitKind nel motore. */
@@ -188,6 +216,8 @@ function qs(p: Params): string {
     volTarget: String(p.volTarget),
     channelMode: p.channelMode,
     anchoredExit: p.anchoredExit,
+    benchmark: p.benchmark,
+    regimeSma: String(p.regimeSma),
   }).toString();
 }
 
@@ -309,9 +339,28 @@ function ParamPanel({
           )}
         </label>
       </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
+        <label className="flex flex-col gap-1 md:col-span-2">
+          <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]"
+            title="Il benchmark decide tre cose: il metatitolo (titolo ÷ benchmark), il filtro di regime e la linea di confronto. La strategia è stata validata con l'MSCI World.">
+            Benchmark
+          </span>
+          <select className="input" value={params.benchmark} onChange={(e) => set("benchmark", e.target.value)}>
+            {Object.entries(BENCHMARK_OPTIONS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+          </select>
+          <span className="text-[10px] text-[var(--muted)]">
+            {params.benchmark === "AUTO"
+              ? `Con ${INDICES.find((i) => i.key === params.index)?.label ?? params.index}: ${BENCHMARK_NAMES[effectiveBenchmark(params)]} (${effectiveBenchmark(params)}).`
+              : `Metatitolo = titolo ÷ ${BENCHMARK_NAMES[params.benchmark]} (${params.benchmark}).`}
+          </span>
+        </label>
+        <NumField label="Media mobile regime (giorni)" value={params.regimeSma} step={10} min={10} max={400}
+          hint="Filtro di regime: niente nuove entrate quando il benchmark è sotto la sua media mobile di questi giorni. 200 è il valore validato."
+          onChange={(v) => set("regimeSma", Math.round(v))} />
+      </div>
       <label className="flex items-center gap-2 mt-3 text-xs text-[var(--muted)]">
         <input type="checkbox" checked={params.useRegime} onChange={(e) => set("useRegime", e.target.checked)} />
-        Filtro di regime: nessuna nuova entrata mentre il benchmark è sotto la SMA 200
+        Filtro di regime: nessuna nuova entrata mentre {BENCHMARK_NAMES[effectiveBenchmark(params)]} è sotto la media mobile a {params.regimeSma} giorni
       </label>
     </div>
   );
@@ -865,106 +914,35 @@ function RotationChart({
   );
 }
 
-/**
- * Registro cronologico delle compravendite del backtest. Di default mostra le
- * ultime 25 (le più recenti sono quelle che interessano di più), espandibile a
- * tutte; filtrabile per titolo perché la domanda tipica è "cosa ha fatto su X".
- */
-function TradeLog({
-  trades,
-}: {
-  trades: BacktestResult["trades"];
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const [filter, setFilter] = useState("");
 
-  const tickers = useMemo(
-    () => [...new Set(trades.map((t) => t.ticker))].sort(),
-    [trades]
-  );
+/** Minuscola solo sulla prima lettera: "Metodo Antonio" → "metodo Antonio". */
+const lcFirst = (t: string) => t.charAt(0).toLowerCase() + t.slice(1);
 
-  const rows = useMemo(() => {
-    const filtered = filter ? trades.filter((t) => t.ticker === filter) : trades;
-    // Dal più recente: in ordine di data di uscita.
-    const sorted = [...filtered].sort((a, b) => b.exitDate.localeCompare(a.exitDate));
-    return expanded ? sorted : sorted.slice(0, 25);
-  }, [trades, filter, expanded]);
-
-  const total = filter ? trades.filter((t) => t.ticker === filter).length : trades.length;
-  if (trades.length === 0) return <p className="text-sm text-[var(--muted)]">Nessuna operazione.</p>;
-
-  return (
-    <div>
-      <div className="flex items-center gap-3 mb-3 flex-wrap">
-        <select className="input text-xs" value={filter} onChange={(e) => setFilter(e.target.value)}>
-          <option value="">Tutti i titoli ({trades.length} operazioni)</option>
-          {tickers.map((t) => (
-            <option key={t} value={t}>
-              {t} ({trades.filter((x) => x.ticker === t).length})
-            </option>
-          ))}
-        </select>
-        <span className="text-xs text-[var(--muted)]">
-          {rows.length} di {total} mostrate, dalla più recente
-        </span>
-      </div>
-
-      <div className="overflow-x-auto">
-        <table className="w-full text-xs [&_th]:pr-4 [&_td]:pr-4 [&_th:last-child]:pr-0 [&_td:last-child]:pr-0">
-          <thead>
-            <tr className="text-[var(--muted)] text-left">
-              <th className="pb-2 font-medium">Titolo</th>
-              <th className="pb-2 font-medium">Acquisto</th>
-              <th className="pb-2 font-medium text-right">Prezzo</th>
-              <th className="pb-2 font-medium">Vendita</th>
-              <th className="pb-2 font-medium text-right">Prezzo</th>
-              <th className="pb-2 font-medium text-right">Quantità</th>
-              <th className="pb-2 font-medium text-right">P&amp;L</th>
-              <th className="pb-2 font-medium text-right">Rend.</th>
-              <th className="pb-2 font-medium text-right">Barre</th>
-              <th className="pb-2 font-medium">Motivo</th>
-            </tr>
-          </thead>
-          <tbody className="font-mono">
-            {rows.map((t, i) => (
-              <tr key={`${t.ticker}-${t.entryDate}-${i}`} className="border-t border-[var(--border)]">
-                <td className="py-1.5 font-semibold">{t.ticker}</td>
-                <td className="py-1.5 text-[var(--positive)]">▲ {t.entryDate}</td>
-                <td className="py-1.5 text-right">${t.entryPrice.toFixed(2)}</td>
-                <td className="py-1.5 text-[var(--negative)]">▼ {t.exitDate}</td>
-                <td className="py-1.5 text-right">${t.exitPrice.toFixed(2)}</td>
-                <td className="py-1.5 text-right text-[var(--muted)]">{t.shares.toFixed(2)}</td>
-                <td className={`py-1.5 text-right ${t.pnl >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>
-                  {t.pnl >= 0 ? "+" : ""}{money(t.pnl)}
-                </td>
-                <td className={`py-1.5 text-right ${t.returnPct >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>
-                  {t.returnPct >= 0 ? "+" : ""}{t.returnPct}%
-                </td>
-                <td className="py-1.5 text-right text-[var(--muted)]">{t.barsHeld}</td>
-                <td className="py-1.5 text-[var(--muted)] font-sans">{OUTCOME_LABELS[t.outcome] ?? t.outcome}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {total > 25 && (
-        <button className="btn-ghost text-xs mt-3" onClick={() => setExpanded((v) => !v)}>
-          {expanded ? "Mostra solo le ultime 25" : `Mostra tutte le ${total} operazioni`}
-        </button>
-      )}
-    </div>
-  );
+/** Una strategia simulata: quanto serve alle tabelle e ai grafici di confronto. */
+interface SimRun {
+  summary: BacktestResult["summary"];
+  equity: { date: string; equity: number }[];
+  walkForward?: BacktestResult["walkForward"];
 }
 
 /**
- * Confronto fra la strategia con e senza protezione dai drawdown, simulate sugli
- * stessi dati e la stessa finestra. È la tabella che serve per decidere: quanto
- * rischio toglie la protezione, e quanto rendimento costa.
+ * Le due strategie del backtest, sempre nello stesso ordine — strategia
+ * attuale (finestra mobile) e metodo Antonio (canali ancorati) — qualunque
+ * delle due sia selezionata nei parametri.
  */
-function ComparisonPanel({ result }: { result: BacktestResult }) {
-  const cmp = result.comparison!;
-  const ab = cmp.kind === "previous_strategy";
+function strategyPair(result: BacktestResult): { attuale: SimRun; antonio: SimRun } | null {
+  if (!result.comparison) return null;
+  const main: SimRun = { summary: result.summary, equity: result.equity, walkForward: result.walkForward };
+  const other: SimRun = result.comparison;
+  return result.options.channelMode === "anchored" ? { attuale: other, antonio: main } : { attuale: main, antonio: other };
+}
+
+/** Tabella di confronto fra due simulazioni sugli stessi dati: metrica per metrica, con la differenza. */
+function CompareTable({
+  result, a, b, aLabel, bLabel,
+}: {
+  result: BacktestResult; a: SimRun; b: SimRun; aLabel: string; bLabel: string;
+}) {
   const ulcer = (eq: { equity: number }[]) => {
     let peak = -Infinity, sum = 0;
     for (const p of eq) { peak = Math.max(peak, p.equity); const d = ((peak - p.equity) / peak) * 100; sum += d * d; }
@@ -972,84 +950,88 @@ function ComparisonPanel({ result }: { result: BacktestResult }) {
   };
   const beats = (wf: BacktestResult["walkForward"]) =>
     wf ? wf.periods.filter((p) => p.summary.totalReturn > (benchReturnBetween(result.benchEquity, p.start, p.end) ?? Infinity)).length : null;
-
   const nFolds = result.walkForward?.periods.length ?? 5;
   /** dp = decimali; unit = suffisso della differenza (punti % o niente). */
   const rows: { label: string; hint: string; a: number | null; b: number | null; dp: number; unit: string; fmt: (v: number) => string; better: "low" | "high" }[] = [
-    { label: "Max drawdown", hint: "La perdita peggiore dal massimo precedente", a: cmp.summary.maxDrawdown, b: result.summary.maxDrawdown, dp: 1, unit: " pt", fmt: (v) => `${v.toFixed(1)}%`, better: "low" },
-    { label: "Ulcer index", hint: "Profondità E durata dei drawdown insieme: più basso = meno sofferenza", a: ulcer(cmp.equity), b: ulcer(result.equity), dp: 1, unit: "", fmt: (v) => v.toFixed(1), better: "low" },
-    { label: "Rendimento totale", hint: "Sull'intera finestra", a: cmp.summary.totalReturn, b: result.summary.totalReturn, dp: 1, unit: " pt", fmt: (v) => `${v.toFixed(1)}%`, better: "high" },
-    { label: "CAGR", hint: "Rendimento annuo composto", a: cmp.summary.cagr, b: result.summary.cagr, dp: 1, unit: " pt", fmt: (v) => `${v.toFixed(1)}%`, better: "high" },
-    { label: "Calmar (CAGR ÷ max DD)", hint: "Rendimento per unità di drawdown: la misura che riassume il compromesso", a: cmp.summary.cagr / Math.max(0.1, cmp.summary.maxDrawdown), b: result.summary.cagr / Math.max(0.1, result.summary.maxDrawdown), dp: 2, unit: "", fmt: (v) => v.toFixed(2), better: "high" },
-    { label: "Profit factor", hint: "Guadagni lordi ÷ perdite lorde", a: cmp.summary.profitFactor, b: result.summary.profitFactor, dp: 2, unit: "", fmt: (v) => v.toFixed(2), better: "high" },
-    { label: "Peggior PF nei periodi", hint: "Il sotto-periodo peggiore del walk-forward", a: cmp.walkForward?.worstProfitFactor ?? null, b: result.walkForward?.worstProfitFactor ?? null, dp: 2, unit: "", fmt: (v) => v.toFixed(2), better: "high" },
-    { label: "Periodi che battono il benchmark", hint: "Su quanti sotto-periodi del walk-forward", a: beats(cmp.walkForward), b: beats(result.walkForward), dp: 0, unit: "", fmt: (v) => `${v}/${nFolds}`, better: "high" },
+    { label: "Rendimento totale", hint: "Sull'intera finestra", a: a.summary.totalReturn, b: b.summary.totalReturn, dp: 1, unit: " pt", fmt: (v) => `${v.toFixed(1)}%`, better: "high" },
+    { label: "CAGR", hint: "Rendimento annuo composto", a: a.summary.cagr, b: b.summary.cagr, dp: 1, unit: " pt", fmt: (v) => `${v.toFixed(1)}%`, better: "high" },
+    { label: "Max drawdown", hint: "La perdita peggiore dal massimo precedente", a: a.summary.maxDrawdown, b: b.summary.maxDrawdown, dp: 1, unit: " pt", fmt: (v) => `${v.toFixed(1)}%`, better: "low" },
+    { label: "Ulcer index", hint: "Profondità E durata dei drawdown insieme: più basso = meno sofferenza", a: ulcer(a.equity), b: ulcer(b.equity), dp: 1, unit: "", fmt: (v) => v.toFixed(1), better: "low" },
+    { label: "Calmar (CAGR ÷ max DD)", hint: "Rendimento per unità di drawdown: la misura che riassume il compromesso", a: a.summary.cagr / Math.max(0.1, a.summary.maxDrawdown), b: b.summary.cagr / Math.max(0.1, b.summary.maxDrawdown), dp: 2, unit: "", fmt: (v) => v.toFixed(2), better: "high" },
+    { label: "Profit factor", hint: "Guadagni lordi ÷ perdite lorde", a: a.summary.profitFactor, b: b.summary.profitFactor, dp: 2, unit: "", fmt: (v) => v.toFixed(2), better: "high" },
+    { label: "Trade", hint: "Operazioni chiuse nel periodo", a: a.summary.trades, b: b.summary.trades, dp: 0, unit: "", fmt: (v) => String(v), better: "high" },
+    { label: "Peggior PF nei periodi", hint: "Il sotto-periodo peggiore del walk-forward", a: a.walkForward?.worstProfitFactor ?? null, b: b.walkForward?.worstProfitFactor ?? null, dp: 2, unit: "", fmt: (v) => v.toFixed(2), better: "high" },
+    { label: "Periodi che battono il benchmark", hint: "Su quanti sotto-periodi del walk-forward", a: beats(a.walkForward), b: beats(b.walkForward), dp: 0, unit: "", fmt: (v) => `${v}/${nFolds}`, better: "high" },
   ];
+  return (
+    <div className="glass rounded-2xl p-4 overflow-x-auto">
+      <table className="w-full text-xs [&_th]:pr-4 [&_td]:pr-4 [&_th:last-child]:pr-0 [&_td:last-child]:pr-0">
+        <thead>
+          <tr className="text-[var(--muted)] text-left">
+            <th className="pb-2 font-medium">Metrica</th>
+            <th className="pb-2 font-medium text-right">{aLabel}</th>
+            <th className="pb-2 font-medium text-right">{bLabel}</th>
+            <th className="pb-2 font-medium text-right">Differenza</th>
+          </tr>
+        </thead>
+        <tbody className="font-mono">
+          {rows.map((r) => {
+            const d = r.a != null && r.b != null ? r.b - r.a : null;
+            // Il numero di trade non è "meglio" né "peggio": niente colore.
+            const good = d == null || d === 0 || r.label === "Trade" ? null : r.better === "low" ? d < 0 : d > 0;
+            return (
+              <tr key={r.label} className="border-t border-[var(--border)]">
+                <td className="py-1.5 font-sans" title={r.hint}>{r.label}</td>
+                <td className="py-1.5 text-right">{r.a != null ? r.fmt(r.a) : "—"}</td>
+                <td className="py-1.5 text-right">{r.b != null ? r.fmt(r.b) : "—"}</td>
+                <td className={`py-1.5 text-right ${good == null ? "text-[var(--muted)]" : good ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>
+                  {d == null ? "—" : `${d > 0 ? "+" : ""}${d.toFixed(r.dp)}${r.unit}`}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <p className="text-[11px] text-[var(--muted)] mt-2">Differenza = {lcFirst(bLabel)} meno {lcFirst(aLabel)}: verde se {lcFirst(bLabel)} fa meglio.</p>
+    </div>
+  );
+}
 
+/** Strategia attuale contro metodo Antonio: sempre, qualunque sia selezionata. */
+function ComparisonPanel({ result }: { result: BacktestResult }) {
+  const pair = strategyPair(result)!;
+  const selected = result.options.channelMode === "anchored" ? "metodo Antonio" : "strategia attuale";
   return (
     <section>
-      {ab ? (
-        <>
-          <h3 className="text-sm font-semibold mb-1">A/B — canali ancorati contro la strategia attuale</h3>
-          <p className="text-xs text-[var(--muted)] mb-2 max-w-3xl">
-            Stessi dati, stessa finestra, stessa protezione dai drawdown: cambia solo come si
-            costruiscono i canali e quindi quando si entra e si esce.
-          </p>
-          <p className="text-[11px] text-[var(--muted)] mb-2 max-w-3xl">
-            Validazione su 5 fasi di partenza (mediane), uscita sul metatitolo: 2021-26 S&amp;P 500
-            +194% contro +140%, drawdown 21,9% contro 20,0%; 2013-21 (mai usato per tarare) +781%
-            contro +460%, drawdown 25,3% contro 25,9%; Nasdaq 100 2021-26 +210% contro +159%, ma
-            drawdown 34,2% contro 24,3%. Rende di più in tutti e tre i test, ma sul Nasdaq il rischio
-            peggiora: per questo resta un&apos;alternativa e non il default. La regola alla lettera
-            (uscita sul canale del prezzo) rende meno della strategia attuale in due test su tre.
-          </p>
-        </>
-      ) : (
-        <>
-          <h3 className="text-sm font-semibold mb-1">Con e senza protezione dai drawdown</h3>
-          <p className="text-xs text-[var(--muted)] mb-2 max-w-3xl">
-            Stessi titoli, stessi segnali, stesse date di ingresso e uscita: cambia solo quanto si
-            investe. Con la volatilità della strategia sopra il {result.options.volTarget}% annuo
-            l&apos;esposizione si riduce in proporzione.
-          </p>
-        </>
-      )}
-      <p className="text-[11px] text-[var(--muted)] mb-2 max-w-3xl">
-        I numeri di un singolo backtest cambiano anche molto spostando l&apos;inizio di un giorno,
-        perché cambia quali titoli si comprano all&apos;avvio (soprattutto il peggior PF dei
-        periodi).{" "}
-        {ab
-          ? "Per questo il confronto che conta è quello sulle 5 fasi qui sopra, non il singolo run."
-          : "La riduzione del drawdown invece è stata verificata su tutte e 5 le fasi dello scan, su un periodo mai usato per tarare (2013-2021) e su un altro universo (Nasdaq 100): regge in tutti e 15 i casi."}
+      <h3 className="text-sm font-semibold mb-1">Strategia attuale contro metodo Antonio</h3>
+      <p className="text-xs text-[var(--muted)] mb-2 max-w-3xl">
+        Le due strategie sugli stessi dati, la stessa finestra e la stessa protezione dai drawdown:
+        cambia solo come si costruiscono i canali, e quindi quando si entra e si esce. Il resto della
+        pagina (riepilogo del portafoglio, operazioni) è della strategia selezionata: {selected}.
       </p>
-      <div className="glass rounded-2xl p-4 overflow-x-auto">
-        <table className="w-full text-xs [&_th]:pr-4 [&_td]:pr-4 [&_th:last-child]:pr-0 [&_td:last-child]:pr-0">
-          <thead>
-            <tr className="text-[var(--muted)] text-left">
-              <th className="pb-2 font-medium">Metrica</th>
-              <th className="pb-2 font-medium text-right">{ab ? "Strategia attuale" : "Senza protezione"}</th>
-              <th className="pb-2 font-medium text-right">{ab ? "Canali ancorati" : "Con protezione"}</th>
-              <th className="pb-2 font-medium text-right">Differenza</th>
-            </tr>
-          </thead>
-          <tbody className="font-mono">
-            {rows.map((r) => {
-              const d = r.a != null && r.b != null ? r.b - r.a : null;
-              const good = d == null || d === 0 ? null : r.better === "low" ? d < 0 : d > 0;
-              return (
-                <tr key={r.label} className="border-t border-[var(--border)]">
-                  <td className="py-1.5 font-sans" title={r.hint}>{r.label}</td>
-                  <td className="py-1.5 text-right text-[var(--muted)]">{r.a != null ? r.fmt(r.a) : "—"}</td>
-                  <td className="py-1.5 text-right font-semibold">{r.b != null ? r.fmt(r.b) : "—"}</td>
-                  <td className={`py-1.5 text-right ${good == null ? "text-[var(--muted)]" : good ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>
-                    {d == null ? "—" : `${d > 0 ? "+" : ""}${d.toFixed(r.dp)}${r.unit}`}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+      <p className="text-[11px] text-[var(--muted)] mb-2 max-w-3xl">
+        Un singolo backtest cambia anche molto spostando l&apos;inizio di un giorno. Nella validazione su
+        5 fasi di partenza (mediane) il metodo Antonio con uscita sul metatitolo ha reso di più in tutti e
+        tre i test (2021-26 S&amp;P 500 +194% contro +140%; 2013-21 +781% contro +460%; Nasdaq 100
+        +210% contro +159%), ma sul Nasdaq con drawdown 34,2% contro 24,3%.
+      </p>
+      <CompareTable result={result} a={pair.attuale} b={pair.antonio} aLabel="Strategia attuale" bLabel="Metodo Antonio" />
+    </section>
+  );
+}
+
+/** La strategia selezionata con e senza protezione dai drawdown. */
+function ProtectionPanel({ result }: { result: BacktestResult }) {
+  const main: SimRun = { summary: result.summary, equity: result.equity, walkForward: result.walkForward };
+  return (
+    <section>
+      <h3 className="text-sm font-semibold mb-1">Con e senza protezione dai drawdown</h3>
+      <p className="text-xs text-[var(--muted)] mb-2 max-w-3xl">
+        La strategia selezionata, con gli stessi titoli e le stesse date di ingresso e uscita: cambia
+        solo quanto si investe. Con la volatilità della strategia sopra il {result.options.volTarget}%
+        annuo l&apos;esposizione si riduce in proporzione.
+      </p>
+      <CompareTable result={result} a={result.protection!} b={main} aLabel="Senza protezione" bLabel="Con protezione" />
     </section>
   );
 }
@@ -1099,22 +1081,30 @@ function BacktestCharts({ result }: { result: BacktestResult }) {
   const [range, setRange] = useState<DateRange>(null);
   const [hover, setHover] = useState<string | null>(null);
 
-  const ab = result.comparison?.kind === "previous_strategy";
-  const mainLabel = !result.comparison ? "strategia" : ab ? "canali ancorati" : "con protezione";
-  const cmpLabel = ab ? "strategia attuale" : "senza protezione";
+  // Sempre le due strategie: strategia attuale (arancio) e metodo Antonio (blu).
+  const pair = useMemo(() => strategyPair(result), [result]);
+  const benchName = BENCHMARK_NAMES[result.options.benchmark] ?? "benchmark";
   const toLine = (eq: { date: string; equity: number }[]) => eq.map((p) => ({ date: p.date, value: p.equity }));
   const ddLine = (eq: { date: string; equity: number }[]) => drawdownSeries(eq).map((p) => ({ date: p.date, value: p.dd }));
 
   const equityLines: ZoomLine[] = useMemo(() => [
-    { label: "benchmark", color: "var(--muted)", points: toLine(result.benchEquity), dashed: true },
-    ...(result.comparison ? [{ label: cmpLabel, color: "var(--warning)", points: toLine(result.comparison.equity) }] : []),
-    { label: mainLabel, color: "var(--accent)", points: toLine(result.equity), strong: true },
-  ], [result, cmpLabel, mainLabel]);
+    { label: benchName, color: "var(--muted)", points: toLine(result.benchEquity), dashed: true },
+    ...(pair
+      ? [
+          { label: "strategia attuale", color: "var(--warning)", points: toLine(pair.attuale.equity), strong: true },
+          { label: "metodo Antonio", color: "var(--accent)", points: toLine(pair.antonio.equity), strong: true },
+        ]
+      : [{ label: "strategia", color: "var(--accent)", points: toLine(result.equity), strong: true }]),
+  ], [result, pair, benchName]);
   const ddLines: ZoomLine[] = useMemo(() => [
-    { label: "benchmark", color: "var(--muted)", points: ddLine(result.benchEquity), fill: true },
-    ...(result.comparison ? [{ label: cmpLabel, color: "var(--warning)", points: ddLine(result.comparison.equity), fill: true }] : []),
-    { label: mainLabel, color: "var(--accent)", points: ddLine(result.equity), fill: true, strong: true },
-  ], [result, cmpLabel, mainLabel]);
+    { label: benchName, color: "var(--muted)", points: ddLine(result.benchEquity), fill: true },
+    ...(pair
+      ? [
+          { label: "strategia attuale", color: "var(--warning)", points: ddLine(pair.attuale.equity), fill: true },
+          { label: "metodo Antonio", color: "var(--accent)", points: ddLine(pair.antonio.equity), fill: true, strong: true },
+        ]
+      : [{ label: "strategia", color: "var(--accent)", points: ddLine(result.equity), fill: true, strong: true }]),
+  ], [result, pair, benchName]);
   const realizedLines: ZoomLine[] = useMemo(() => {
     const last = result.realizedCurve[result.realizedCurve.length - 1]?.realized ?? 0;
     return [{
@@ -1215,6 +1205,308 @@ function BacktestCharts({ result }: { result: BacktestResult }) {
   );
 }
 
+/**
+ * Walk-forward: periodi consecutivi, ognuno con capitale fresco. Con un termine
+ * di paragone (strategia precedente, o la stessa senza protezione) le due
+ * strategie stanno affiancate periodo per periodo: si vede DOVE vince l'una e
+ * dove l'altra, non solo il totale.
+ */
+function WalkForwardPanel({ result }: { result: BacktestResult }) {
+  // Colonne sempre nello stesso ordine: strategia attuale, poi metodo Antonio.
+  const pair = strategyPair(result);
+  const wf = (pair ? pair.antonio.walkForward : result.walkForward)!;
+  const cmpWf = pair?.attuale.walkForward;
+  const mainLabel = cmpWf ? "Metodo Antonio" : "Strategia";
+  const cmpLabel = "Strategia attuale";
+  const pct = (v: number | null) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`);
+  const tone = (v: number | null) => (v == null ? "" : v >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]");
+
+  const rows = wf.periods.map((p, k) => {
+    const c = cmpWf?.periods[k];
+    const bench = benchReturnBetween(result.benchEquity, p.start, p.end);
+    const winner = c ? (p.summary.totalReturn > c.summary.totalReturn ? "main" : p.summary.totalReturn < c.summary.totalReturn ? "cmp" : null) : null;
+    return { p, c, bench, winner };
+  });
+  const winsMain = rows.filter((r) => r.winner === "main").length;
+  const winsCmp = rows.filter((r) => r.winner === "cmp").length;
+  const beats = (get: (r: (typeof rows)[number]) => number | undefined) =>
+    rows.filter((r) => r.bench != null && get(r) != null && get(r)! > r.bench).length;
+
+  return (
+    <section>
+      <h3 className="text-sm font-semibold mb-1">Walk-forward{cmpWf ? ": le due strategie periodo per periodo" : ""}</h3>
+      <p className="text-xs text-[var(--muted)] mb-2 max-w-3xl">
+        Periodi consecutivi, ognuno simulato con capitale fresco. Un edge vero regge in (quasi)
+        ogni sotto-periodo: se sta in piedi solo sul totale, è fortuna.
+      </p>
+      {cmpWf && (
+        <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs mb-2">
+          <span>Periodi vinti: <strong>{lcFirst(mainLabel)} {winsMain}</strong> · {lcFirst(cmpLabel)} {winsCmp} su {rows.length}</span>
+          <span className="text-[var(--muted)]">
+            Battono {BENCHMARK_NAMES[result.options.benchmark] ?? result.options.benchmark}: {lcFirst(mainLabel)} {beats((r) => r.p.summary.totalReturn)}/{rows.length},{" "}
+            {lcFirst(cmpLabel)} {beats((r) => r.c?.summary.totalReturn)}/{rows.length}
+          </span>
+        </div>
+      )}
+      <div className="glass rounded-2xl p-4 overflow-x-auto">
+        <table className="w-full text-xs [&_th]:pr-4 [&_td]:pr-4 [&_th:last-child]:pr-0 [&_td:last-child]:pr-0">
+          <thead>
+            <tr className="text-[var(--muted)] text-left">
+              <th className="pb-2 font-medium" rowSpan={cmpWf ? 2 : 1}>Periodo</th>
+              {cmpWf && <th className="pb-1 font-medium text-center border-b border-[var(--border)]" colSpan={3}>{cmpLabel}</th>}
+              <th className="pb-1 font-medium text-center border-b border-[var(--border)]" colSpan={cmpWf ? 3 : 4}>{mainLabel}</th>
+              <th className="pb-2 font-medium text-right" rowSpan={cmpWf ? 2 : 1}>
+                {BENCHMARK_NAMES[result.options.benchmark] ?? "Benchmark"}
+              </th>
+              {cmpWf && <th className="pb-2 font-medium text-right" rowSpan={2}>Meglio</th>}
+            </tr>
+            <tr className="text-[var(--muted)] text-left">
+              {[...(cmpWf ? [0] : []), 1].map((k) => (
+                <Fragment key={k}>
+                  <th className="pb-2 pt-1 font-medium text-right">Rend.</th>
+                  <th className="pb-2 pt-1 font-medium text-right">Max DD</th>
+                  <th className="pb-2 pt-1 font-medium text-right">PF</th>
+                </Fragment>
+              ))}
+              {!cmpWf && <th className="pb-2 pt-1 font-medium text-right">Trade</th>}
+            </tr>
+          </thead>
+          <tbody className="font-mono">
+            {rows.map(({ p, c, bench, winner }) => (
+              <tr key={p.start} className="border-t border-[var(--border)]">
+                <td className="py-1.5">{p.start} → {p.end}</td>
+                {c && (
+                  <>
+                    <td className={`py-1.5 text-right ${tone(c.summary.totalReturn)} ${winner === "cmp" ? "font-semibold" : ""}`}>{pct(c.summary.totalReturn)}</td>
+                    <td className="py-1.5 text-right text-[var(--muted)]">{c.summary.maxDrawdown != null ? `${c.summary.maxDrawdown}%` : "—"}</td>
+                    <td className="py-1.5 text-right text-[var(--muted)]">{c.summary.profitFactor}</td>
+                  </>
+                )}
+                <td className={`py-1.5 text-right ${tone(p.summary.totalReturn)} ${winner === "main" ? "font-semibold" : ""}`}>{pct(p.summary.totalReturn)}</td>
+                <td className="py-1.5 text-right text-[var(--muted)]">{p.summary.maxDrawdown != null ? `${p.summary.maxDrawdown}%` : "—"}</td>
+                <td className="py-1.5 text-right text-[var(--muted)]">{p.summary.profitFactor}</td>
+                {!c && <td className="py-1.5 text-right">{p.summary.trades}</td>}
+                <td className="py-1.5 text-right text-[var(--muted)]">{pct(bench)}</td>
+                {cmpWf && (
+                  <td className="py-1.5 text-right font-sans">
+                    {winner === "main" ? <span className="text-[var(--accent)]">{mainLabel}</span>
+                      : winner === "cmp" ? <span className="text-[var(--warning)]">{cmpLabel}</span> : "pari"}
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+// Sotto il mezzo centesimo è zero: un portafoglio tutto investito non deve mostrare "−$0,01".
+const usd = (v: number) => {
+  const x = Math.abs(v) < 0.005 ? 0 : v;
+  return `${x < 0 ? "−" : ""}$${Math.abs(x).toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+};
+const pnlTone = (v: number | null) => (v == null || v === 0 ? "text-[var(--muted)]" : v > 0 ? "text-[var(--positive)]" : "text-[var(--negative)]");
+
+/**
+ * Il portafoglio del backtest nel formato del riepilogo di Antonio: una riga
+ * per titolo (aperto o chiuso) con P&L realizzato e non realizzato, totali e
+ * liquidità, e sotto il registro operazioni con la liquidità residua dopo
+ * ogni riga. Lo stato è quello dell'ultimo giorno del backtest.
+ */
+function BacktestPortfolioPanel({ result }: { result: BacktestResult }) {
+  const initial = (result.options as { accountSize?: number }).accountSize ?? 10_000;
+  const pf = useMemo(
+    () => backtestPortfolio(result.trades, result.endPrices ?? {}, result.names ?? {}, initial),
+    [result, initial]
+  );
+  const [onlyOpen, setOnlyOpen] = useState(false);
+  const [ledgerTicker, setLedgerTicker] = useState("");
+  const [ledgerAll, setLedgerAll] = useState(false);
+  const last = result.equity[result.equity.length - 1]?.date ?? "";
+
+  const rows = onlyOpen ? pf.rows.filter((r) => r.status === "APERTA") : pf.rows;
+  const ledger = useMemo(() => {
+    const l = ledgerTicker ? pf.ledger.filter((r) => r.ticker === ledgerTicker) : pf.ledger;
+    const recent = [...l].reverse();
+    return ledgerAll ? recent : recent.slice(0, 30);
+  }, [pf, ledgerTicker, ledgerAll]);
+  const ledgerTotal = ledgerTicker ? pf.ledger.filter((r) => r.ticker === ledgerTicker).length : pf.ledger.length;
+  const t = pf.totals;
+
+  return (
+    <>
+      <section>
+        <h3 className="text-sm font-semibold mb-1">Riepilogo per titolo: posizioni aperte e P&amp;L realizzato e non realizzato</h3>
+        <p className="text-xs text-[var(--muted)] mb-2 max-w-3xl">
+          Il portafoglio simulato com&apos;è all&apos;ultimo giorno del backtest ({last}). P&amp;L realizzato:
+          somma di tutte le vendite di quel titolo nel tempo. P&amp;L aperto: plus o minus sulla quantità
+          ancora detenuta, rispetto al costo medio, alla chiusura dell&apos;ultimo giorno.
+        </p>
+
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-3">
+          <Stat label="Valore titoli" value={usd(t.value)} />
+          <Stat label="Liquidità" value={usd(t.cash)} />
+          <Stat label="Capitale totale" value={usd(t.equity)} tone={t.equity >= t.initial ? "pos" : "neg"} />
+          <Stat label="P&L realizzato" value={usd(t.realizedPnl)} tone={t.realizedPnl >= 0 ? "pos" : "neg"} />
+          <Stat label="P&L aperto" value={usd(t.openPnl)} tone={t.openPnl >= 0 ? "pos" : "neg"} />
+        </div>
+
+        <div className="glass rounded-2xl p-4">
+          <div className="flex items-center gap-3 mb-3 flex-wrap text-xs">
+            <label className="flex items-center gap-2 text-[var(--muted)]">
+              <input type="checkbox" checked={onlyOpen} onChange={(e) => setOnlyOpen(e.target.checked)} />
+              Solo posizioni aperte ({t.openPositions})
+            </label>
+            <span className="text-[var(--muted)]">{rows.length} titoli · capitale iniziale {usd(t.initial)}</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs [&_th]:pr-3 [&_td]:pr-3 [&_th:last-child]:pr-0 [&_td:last-child]:pr-0 whitespace-nowrap">
+              <thead>
+                <tr className="text-[var(--muted)] text-left">
+                  <th className="pb-2 font-medium">Titolo</th>
+                  <th className="pb-2 font-medium text-right">Qtà</th>
+                  <th className="pb-2 font-medium text-right">Costo medio</th>
+                  <th className="pb-2 font-medium text-right">Prezzo</th>
+                  <th className="pb-2 font-medium text-right">Valore</th>
+                  <th className="pb-2 font-medium text-right" title="Somma dei P&L di tutte le vendite di questo titolo">P&amp;L realizzato</th>
+                  <th className="pb-2 font-medium text-right" title="Plus/minus sulla quantità ancora detenuta">P&amp;L aperto</th>
+                  <th className="pb-2 font-medium text-right">P&amp;L totale</th>
+                  <th className="pb-2 font-medium text-center">Stato</th>
+                  <th className="pb-2 font-medium text-right" title="Peso sul capitale totale">% portaf.</th>
+                  <th className="pb-2 font-medium text-right" title="Variazione dell'ultimo giorno">% giorno</th>
+                  <th className="pb-2 font-medium text-right" title="Controvalore d'acquisto della quantità in portafoglio">Investito</th>
+                </tr>
+              </thead>
+              <tbody className="font-mono">
+                {rows.map((r) => (
+                  <tr key={r.ticker} className={`border-t border-[var(--border)] ${r.status === "APERTA" ? "" : "opacity-75"}`}>
+                    <td className="py-1.5">
+                      <span className="font-semibold">{r.ticker}</span>{" "}
+                      <span className="font-sans text-[var(--muted)]">{r.name}</span>
+                    </td>
+                    <td className="py-1.5 text-right">{r.shares ? r.shares.toLocaleString("it-IT", { maximumFractionDigits: 2 }) : "0"}</td>
+                    <td className="py-1.5 text-right">{r.shares ? usd(r.avgCost) : "—"}</td>
+                    <td className="py-1.5 text-right">{usd(r.price)}</td>
+                    <td className="py-1.5 text-right">{r.value ? usd(r.value) : "—"}</td>
+                    <td className={`py-1.5 text-right ${pnlTone(r.realizedPnl)}`}>{r.realizedPnl ? usd(r.realizedPnl) : "0"}</td>
+                    <td className={`py-1.5 text-right ${pnlTone(r.openPnl)}`}>
+                      {r.status === "APERTA" ? <>{usd(r.openPnl)}{r.openPct != null && <span className="text-[10px]"> ({r.openPct >= 0 ? "+" : ""}{r.openPct.toFixed(1)}%)</span>}</> : "0"}
+                    </td>
+                    <td className={`py-1.5 text-right font-semibold ${pnlTone(r.totalPnl)}`}>{usd(r.totalPnl)}</td>
+                    <td className="py-1.5 text-center font-sans">
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${r.status === "APERTA" ? "bg-[var(--positive)]/15 text-[var(--positive)]" : "bg-[var(--surface-2)] text-[var(--muted)]"}`}>
+                        {r.status}
+                      </span>
+                    </td>
+                    <td className="py-1.5 text-right">{r.status === "APERTA" ? `${r.weightPct.toFixed(1)}%` : "—"}</td>
+                    <td className={`py-1.5 text-right ${pnlTone(r.dayPct)}`}>{r.dayPct != null ? `${r.dayPct >= 0 ? "+" : ""}${r.dayPct.toFixed(2)}%` : "—"}</td>
+                    <td className="py-1.5 text-right">{r.invested ? usd(r.invested) : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot className="font-mono">
+                <tr className="border-t-2 border-[var(--border)] font-semibold">
+                  <td className="pt-2 font-sans">Totale titoli</td>
+                  <td colSpan={3} />
+                  <td className="pt-2 text-right">{usd(t.value)}</td>
+                  <td className={`pt-2 text-right ${pnlTone(t.realizedPnl)}`}>{usd(t.realizedPnl)}</td>
+                  <td className={`pt-2 text-right ${pnlTone(t.openPnl)}`}>{usd(t.openPnl)}</td>
+                  <td className={`pt-2 text-right ${pnlTone(t.totalPnl)}`}>{usd(t.totalPnl)}</td>
+                  <td className="pt-2 text-center font-sans text-[10px] text-[var(--muted)]">{t.openPositions} aperte</td>
+                  <td className="pt-2 text-right">{t.equity > 0 ? `${((t.value / t.equity) * 100).toFixed(1)}%` : "—"}</td>
+                  <td />
+                  <td className="pt-2 text-right">{usd(t.invested)}</td>
+                </tr>
+                <tr className="text-[var(--muted)]">
+                  <td className="pt-1 font-sans">Liquidità</td>
+                  <td colSpan={3} />
+                  <td className="pt-1 text-right">{usd(t.cash)}</td>
+                  <td colSpan={4} />
+                  <td className="pt-1 text-right">{t.equity > 0 ? `${((t.cash / t.equity) * 100).toFixed(1)}%` : "—"}</td>
+                  <td colSpan={2} />
+                </tr>
+                <tr className="font-semibold">
+                  <td className="pt-1 font-sans">Capitale totale</td>
+                  <td colSpan={3} />
+                  <td className="pt-1 text-right">{usd(t.equity)}</td>
+                  <td colSpan={2} />
+                  <td className={`pt-1 text-right ${pnlTone(t.equity - t.initial)}`}>
+                    {t.initial > 0 ? `${t.equity >= t.initial ? "+" : ""}${(((t.equity - t.initial) / t.initial) * 100).toFixed(1)}%` : ""}
+                  </td>
+                  <td colSpan={4} />
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h3 className="text-sm font-semibold mb-1">Registro operazioni</h3>
+        <p className="text-xs text-[var(--muted)] mb-2 max-w-3xl">
+          Ogni acquisto e vendita del portafoglio simulato, con la liquidità che resta dopo ogni riga.
+          Si parte da {usd(t.initial)}; le vendite parziali sono le riduzioni della protezione dai drawdown.
+          Le posizioni ancora aperte non compaiono come vendite.
+        </p>
+        <div className="glass rounded-2xl p-4">
+          <div className="flex items-center gap-3 mb-3 flex-wrap">
+            <select className="input text-xs" value={ledgerTicker} onChange={(e) => setLedgerTicker(e.target.value)}>
+              <option value="">Tutti i titoli ({pf.ledger.length} operazioni)</option>
+              {pf.rows.map((r) => r.ticker).sort().map((tk) => (
+                <option key={tk} value={tk}>{tk} ({pf.ledger.filter((x) => x.ticker === tk).length})</option>
+              ))}
+            </select>
+            <span className="text-xs text-[var(--muted)]">{ledger.length} di {ledgerTotal} mostrate, dalla più recente</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs [&_th]:pr-3 [&_td]:pr-3 [&_th:last-child]:pr-0 [&_td:last-child]:pr-0 whitespace-nowrap">
+              <thead>
+                <tr className="text-[var(--muted)] text-left">
+                  <th className="pb-2 font-medium">N.</th>
+                  <th className="pb-2 font-medium">Data</th>
+                  <th className="pb-2 font-medium">Titolo</th>
+                  <th className="pb-2 font-medium">Operazione</th>
+                  <th className="pb-2 font-medium text-right">Qtà</th>
+                  <th className="pb-2 font-medium text-right">Prezzo</th>
+                  <th className="pb-2 font-medium text-right">Controvalore</th>
+                  <th className="pb-2 font-medium text-right">P&amp;L</th>
+                  <th className="pb-2 font-medium text-right">Liquidità residua</th>
+                  <th className="pb-2 font-medium">Motivo</th>
+                </tr>
+              </thead>
+              <tbody className="font-mono">
+                {ledger.map((r) => (
+                  <tr key={r.n} className="border-t border-[var(--border)]">
+                    <td className="py-1.5 text-[var(--muted)]">{r.n}</td>
+                    <td className="py-1.5">{r.date}</td>
+                    <td className="py-1.5 font-semibold">{r.ticker}</td>
+                    <td className={`py-1.5 font-sans ${r.side === "ACQUISTO" ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>
+                      {r.side === "ACQUISTO" ? "▲ acquisto" : "▼ vendita"}
+                    </td>
+                    <td className="py-1.5 text-right">{r.shares.toLocaleString("it-IT", { maximumFractionDigits: 2 })}</td>
+                    <td className="py-1.5 text-right">{usd(r.price)}</td>
+                    <td className={`py-1.5 text-right ${r.amount < 0 ? "text-[var(--negative)]" : "text-[var(--positive)]"}`}>{usd(r.amount)}</td>
+                    <td className={`py-1.5 text-right ${pnlTone(r.pnl ?? null)}`}>{r.pnl != null ? usd(r.pnl) : ""}</td>
+                    <td className="py-1.5 text-right">{usd(r.cash)}</td>
+                    <td className="py-1.5 font-sans text-[var(--muted)]">{r.outcome ? OUTCOME_LABELS[r.outcome] ?? r.outcome : ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {ledgerTotal > 30 && (
+            <button className="btn-ghost text-xs mt-3" onClick={() => setLedgerAll((v) => !v)}>
+              {ledgerAll ? "Mostra solo le ultime 30" : `Mostra tutte le ${ledgerTotal} operazioni`}
+            </button>
+          )}
+        </div>
+      </section>
+    </>
+  );
+}
+
 function BacktestPanel({ params }: { params: Params }) {
   const job = useJob<BacktestResult>(BACKTEST_KEY);
   const result = job.result ?? null;
@@ -1291,11 +1583,11 @@ function BacktestPanel({ params }: { params: Params }) {
             </div>
           )}
 
-          {result.comparison && (
-            <ComparisonPanel result={result} />
-          )}
+          {result.comparison && <ComparisonPanel result={result} />}
 
           <BacktestCharts result={result} />
+
+          {result.protection && <ProtectionPanel result={result} />}
 
           <section>
             <h3 className="text-sm font-semibold mb-1">P&amp;L realizzato per titolo</h3>
@@ -1307,17 +1599,7 @@ function BacktestPanel({ params }: { params: Params }) {
             </div>
           </section>
 
-          <section>
-            <h3 className="text-sm font-semibold mb-1">Storico delle operazioni</h3>
-            <p className="text-xs text-[var(--muted)] mb-2">
-              Ogni compravendita che la strategia avrebbe fatto, in ordine di data. È il registro
-              da cui nascono la curva di equity e il P&amp;L: qui sopra vedi i totali, qui vedi
-              i singoli segnali che li hanno prodotti.
-            </p>
-            <div className="glass rounded-2xl p-4">
-              <TradeLog trades={result.trades} />
-            </div>
-          </section>
+          <BacktestPortfolioPanel result={result} />
 
           <section>
             <h3 className="text-sm font-semibold mb-1">Rotazione dei leader</h3>
@@ -1330,51 +1612,7 @@ function BacktestPanel({ params }: { params: Params }) {
             </div>
           </section>
 
-          {result.walkForward && (
-            <section>
-              <h3 className="text-sm font-semibold mb-1">Walk-forward</h3>
-              <p className="text-xs text-[var(--muted)] mb-2">
-                Periodi consecutivi, ognuno simulato con capitale fresco. Un edge vero regge in
-                (quasi) ogni sotto-periodo — se sta in piedi solo sul totale, è fortuna.
-              </p>
-              <div className="glass rounded-2xl p-4 overflow-x-auto">
-                <table className="w-full text-xs [&_th]:pr-4 [&_td]:pr-4 [&_th:last-child]:pr-0 [&_td:last-child]:pr-0">
-                  <thead>
-                    <tr className="text-[var(--muted)] text-left">
-                      <th className="pb-2 font-medium">Periodo</th>
-                      <th className="pb-2 font-medium text-right">Strategia</th>
-                      <th className="pb-2 font-medium text-right">Benchmark</th>
-                      <th className="pb-2 font-medium text-right">Delta</th>
-                      <th className="pb-2 font-medium text-right">PF</th>
-                      <th className="pb-2 font-medium text-right">Trade</th>
-                    </tr>
-                  </thead>
-                  <tbody className="font-mono">
-                    {result.walkForward.periods.map((p) => {
-                      const bench = benchReturnBetween(result.benchEquity, p.start, p.end);
-                      const delta = bench != null ? p.summary.totalReturn - bench : null;
-                      return (
-                        <tr key={p.start} className="border-t border-[var(--border)]">
-                          <td className="py-1.5">{p.start} → {p.end}</td>
-                          <td className={`py-1.5 text-right ${p.summary.totalReturn >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>
-                            {p.summary.totalReturn >= 0 ? "+" : ""}{p.summary.totalReturn}%
-                          </td>
-                          <td className="py-1.5 text-right text-[var(--muted)]">
-                            {bench != null ? `${bench >= 0 ? "+" : ""}${bench.toFixed(1)}%` : "—"}
-                          </td>
-                          <td className={`py-1.5 text-right ${delta == null ? "" : delta >= 0 ? "text-[var(--positive)]" : "text-[var(--negative)]"}`}>
-                            {delta != null ? `${delta >= 0 ? "+" : ""}${delta.toFixed(1)}` : "—"}
-                          </td>
-                          <td className="py-1.5 text-right">{p.summary.profitFactor}</td>
-                          <td className="py-1.5 text-right">{p.summary.trades}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          )}
+          {result.walkForward && <WalkForwardPanel result={result} />}
         </div>
       )}
     </div>
@@ -1396,7 +1634,7 @@ export default function WorldMomentumPage() {
       <header>
         <h1 className="text-2xl font-semibold tracking-tight gradient-text">Momentum World</h1>
         <p className="text-sm text-[var(--muted)] mt-1 max-w-3xl">
-          Due stadi sul canale di regressione. Il <strong>metatitolo</strong> (titolo ÷ MSCI World)
+          Due stadi sul canale di regressione. Il <strong>metatitolo</strong> (titolo ÷ benchmark, di default MSCI World)
           dice chi batte il benchmark; il canale sul <strong>prezzo</strong> dice quando entrare.
           Si esce quando il canale del metatitolo si rompe — cioè quando il titolo smette di essere
           più forte del mondo.

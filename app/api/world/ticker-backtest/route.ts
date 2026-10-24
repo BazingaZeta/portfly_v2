@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runTickerBacktest, channelParams, type ExitRule } from "@/lib/worldMomentum";
+import { runTickerBacktest, channelParams, marketParams, type ExitRule } from "@/lib/worldMomentum";
 import { getSession } from "@/lib/auth";
 
 export const runtime = "nodejs";
@@ -36,6 +36,7 @@ export async function GET(req: NextRequest) {
       exitRule,
       // channelMode viene ignorato (girano entrambe), anchoredExit decide l'uscita del metodo Antonio.
       ...channelParams(req.nextUrl.searchParams),
+      ...marketParams(req.nextUrl.searchParams),
       metaWindow: num(req, "metaWindow", 60),
       minMetaR2: num(req, "minMetaR2", 0.5),
       priceWindow: num(req, "priceWindow", 40),

@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { runWorldAnalysis, channelParams, type WorldProgress } from "@/lib/worldMomentum";
+import { runWorldAnalysis, channelParams, marketParams, type WorldProgress } from "@/lib/worldMomentum";
 import { getSession } from "@/lib/auth";
 
 export const runtime = "nodejs";
@@ -23,6 +23,7 @@ export async function GET(req: NextRequest) {
   const opts = {
     indexKey,
     ...channelParams(req.nextUrl.searchParams),
+    ...marketParams(req.nextUrl.searchParams),
     metaWindow: num(req, "metaWindow", 60),
     minMetaR2: num(req, "minMetaR2", 0.5),
     strongTopN: num(req, "strongTopN", 20),

@@ -378,20 +378,36 @@ export interface WorldMomentumResult {
   /** Benchmark buy & hold sulla stessa finestra, stesso capitale iniziale. */
   benchEquity: { date: string; equity: number }[];
   trades: WorldTrade[];
+  /**
+   * Ogni titolo passato dal portafoglio: chiusura dell'ultimo giorno del test e
+   * del giorno prima, per valutarlo e per la variazione del giorno nel
+   * riepilogo per titolo. I titoli ancora aperti sono le righe "end_of_test".
+   */
+  endPrices: Record<string, { close: number; prevClose: number }>;
+  /** Nome di ogni titolo scambiato, per il riepilogo. */
+  names: Record<string, string>;
   perTicker: TickerAttribution[];
   rankingHistory: RankingSnapshot[];
   walkForward?: WalkForwardReport;
   /**
-   * Il termine di paragone, simulato sugli stessi dati e la stessa finestra:
-   *  - con i canali ancorati, la strategia PRECEDENTE (canali a finestra
-   *    mobile, stessa protezione) — è l'A/B che decide se cambiare strategia;
-   *  - con i canali a finestra mobile, la stessa strategia senza volatility
-   *    targeting — misura quanto rischio toglie la protezione.
-   * Assente se non c'è niente da confrontare (finestra mobile e volTarget 0).
+   * L'ALTRA strategia (canali a finestra mobile ↔ canali ancorati), sugli
+   * stessi dati, la stessa finestra e la stessa protezione: c'è sempre, così
+   * il confronto fra strategia attuale e metodo Antonio è sempre a schermo,
+   * qualunque delle due sia selezionata.
    */
   comparison?: {
-    kind: "previous_strategy" | "no_vol_target";
+    kind: "other_strategy";
+    channelMode: ChannelMode;
     label: string;
+    summary: BacktestSummary;
+    equity: { date: string; equity: number }[];
+    walkForward?: WalkForwardReport;
+  };
+  /**
+   * La strategia selezionata SENZA volatility targeting: misura quanto rischio
+   * toglie la protezione e quanto rendimento costa. Assente se volTarget = 0.
+   */
+  protection?: {
     summary: BacktestSummary;
     equity: { date: string; equity: number }[];
     walkForward?: WalkForwardReport;
@@ -818,6 +834,8 @@ export function attributeByTicker(trades: WorldTrade[]): TickerAttribution[] {
 // ─── Simulazione ──────────────────────────────────────────────────────────────
 
 interface SimOutput {
+  /** Ogni titolo scambiato nel test: chiusura dell'ultimo giorno e del giorno prima. */
+  endPrices: Record<string, { close: number; prevClose: number }>;
   summary: BacktestSummary;
   equity: { date: string; equity: number }[];
   realizedCurve: { date: string; realized: number }[];
@@ -863,6 +881,7 @@ function simulate(
 
   if (dates.length < 2) {
     return {
+      endPrices: {},
       summary: emptySummary(opts.accountSize),
       equity: [], realizedCurve: [], trades: [], rankingHistory: [],
       signalsTotal: 0, signalsTaken: 0,
@@ -1236,7 +1255,26 @@ function simulate(
   peak = Math.max(peak, realized);
   maxDd = Math.max(maxDd, peak > 0 ? (peak - realized) / peak : 0);
 
+  // Prezzo di fine test di ogni titolo passato dal portafoglio, aperto o
+  // chiuso: serve al riepilogo per titolo (valore, variazione del giorno).
+  const endPrices: SimOutput["endPrices"] = {};
+  for (const t of new Set(trades.map((x) => x.ticker))) {
+    const td = dataByTicker.get(t);
+    if (!td) continue;
+    let i = td.dateIdx.get(lastDate);
+    if (i == null) {
+      // Titolo senza barra nell'ultimo giorno (sospeso, delistato): l'ultima disponibile prima.
+      i = td.candles.length - 1;
+      while (i > 0 && td.candles[i].date > lastDate) i--;
+    }
+    endPrices[t] = {
+      close: +td.candles[i].close.toFixed(4),
+      prevClose: +td.candles[Math.max(0, i - 1)].close.toFixed(4),
+    };
+  }
+
   return {
+    endPrices,
     summary: buildSummary(trades, realized, maxDd, opts),
     equity: equityCurve,
     realizedCurve,
@@ -2418,6 +2456,34 @@ export function resolveWorldOptions(opts: WorldMomentumOptions): ResolvedWorldOp
   };
 }
 
+/** Benchmark selezionabili: ETF che replicano gli indici, con storico Yahoo lungo. */
+export const BENCHMARKS: Record<string, string> = {
+  URTH: "MSCI World",
+  SPY: "S&P 500",
+  QQQ: "Nasdaq 100",
+  DIA: "Dow Jones 30",
+};
+
+/** Il benchmark naturale di ogni universo, per la scelta "automatico". */
+export function autoBenchmark(indexKey: string): string {
+  if (indexKey === "NDX") return "QQQ";
+  if (indexKey === "DJIA") return "DIA";
+  return "SPY";
+}
+
+/**
+ * Benchmark e media mobile del filtro di regime dai query param. "auto" segue
+ * l'indice analizzato; valori sconosciuti tornano al default validato
+ * (MSCI World, SMA 200).
+ */
+export function marketParams(sp: URLSearchParams): { benchmark: string; regimeSma: number } {
+  const raw = (sp.get("benchmark") ?? "").toUpperCase();
+  const benchmark =
+    raw === "AUTO" ? autoBenchmark(sp.get("index") ?? "SP500") : BENCHMARKS[raw] ? raw : WORLD_BENCHMARK;
+  const sma = Math.round(Number(sp.get("regimeSma")));
+  return { benchmark, regimeSma: Number.isFinite(sma) && sma >= 10 && sma <= 400 ? sma : 200 };
+}
+
 /**
  * Modalità dei canali dai query param delle route: valori sconosciuti → default.
  * Un solo parser per tutte le route, così analisi, dettaglio, storico segnali e
@@ -2446,7 +2512,7 @@ export async function runWorldMomentum(
   const opts = resolveWorldOptions(options);
   const def = indexByKey(opts.indexKey);
   if (!def) throw new Error(`Indice sconosciuto: ${opts.indexKey}`);
-  if (opts.startDate < WORLD_BENCHMARK_INCEPTION) {
+  if (opts.benchmark === WORLD_BENCHMARK && opts.startDate < WORLD_BENCHMARK_INCEPTION) {
     throw new Error(
       `Il benchmark ${opts.benchmark} esiste dal ${WORLD_BENCHMARK_INCEPTION}: startDate non può essere precedente`
     );
@@ -2507,29 +2573,25 @@ export async function runWorldMomentum(
 
   const walkForward = walkForwardOf(opts);
 
-  let comparison: WorldMomentumResult["comparison"];
-  if (opts.channelMode === "anchored") {
-    // L'A/B: stessi dati, stessa finestra, stessa protezione dal drawdown —
-    // cambia SOLO come si costruiscono i canali.
-    const prev: ResolvedWorldOptions = { ...opts, channelMode: "rolling" };
-    const r = simulate(allData, benchCandles, prev, cache, anchCache);
-    comparison = {
-      kind: "previous_strategy",
-      label: "strategia precedente",
-      summary: r.summary,
-      equity: r.equity,
-      walkForward: walkForwardOf(prev),
-    };
-  } else if (opts.volTarget > 0) {
+  // L'A/B fra le due strategie: stessi dati, stessa finestra, stessa
+  // protezione dal drawdown — cambia SOLO come si costruiscono i canali.
+  const otherMode: ChannelMode = opts.channelMode === "anchored" ? "rolling" : "anchored";
+  const otherOpts: ResolvedWorldOptions = { ...opts, channelMode: otherMode };
+  const other = simulate(allData, benchCandles, otherOpts, cache, anchCache);
+  const comparison: WorldMomentumResult["comparison"] = {
+    kind: "other_strategy",
+    channelMode: otherMode,
+    label: otherMode === "anchored" ? "metodo Antonio" : "strategia attuale",
+    summary: other.summary,
+    equity: other.equity,
+    walkForward: walkForwardOf(otherOpts),
+  };
+
+  let protection: WorldMomentumResult["protection"];
+  if (opts.volTarget > 0) {
     const bare = { ...opts, volTarget: 0 };
     const r = simulate(allData, benchCandles, bare, cache, anchCache);
-    comparison = {
-      kind: "no_vol_target",
-      label: "senza protezione",
-      summary: r.summary,
-      equity: r.equity,
-      walkForward: walkForwardOf(bare),
-    };
+    protection = { summary: r.summary, equity: r.equity, walkForward: walkForwardOf(bare) };
   }
 
   return {
@@ -2538,10 +2600,13 @@ export async function runWorldMomentum(
     realizedCurve: full.realizedCurve,
     benchEquity,
     trades: full.trades,
+    endPrices: full.endPrices,
+    names: Object.fromEntries([...new Set(full.trades.map((t) => t.ticker))].map((t) => [t, nameFor(t)])),
     perTicker: attributeByTicker(full.trades),
     rankingHistory: full.rankingHistory,
     walkForward,
     comparison,
+    protection,
     options: opts,
     tickersTested: allData.length,
     signalsTotal: full.signalsTotal,
